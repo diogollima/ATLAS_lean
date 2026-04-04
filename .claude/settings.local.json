@@ -60,7 +60,8 @@
       "WebFetch(domain:quantpedia.medium.com)",
       "WebFetch(domain:pdfs.semanticscholar.org)",
       "WebFetch(domain:link.springer.com)",
-      "WebFetch(domain:centaur.reading.ac.uk)"
+      "WebFetch(domain:centaur.reading.ac.uk)",
+      "Bash(gh auth:*)"
     ]
   }
 }
