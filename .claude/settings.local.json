@@ -61,7 +61,11 @@
       "WebFetch(domain:pdfs.semanticscholar.org)",
       "WebFetch(domain:link.springer.com)",
       "WebFetch(domain:centaur.reading.ac.uk)",
-      "Bash(gh auth:*)"
+      "Bash(gh auth:*)",
+      "Bash(gh pr:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }
