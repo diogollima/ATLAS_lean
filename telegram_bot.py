@@ -73,6 +73,15 @@ class TelegramBot:
         self._app.add_handler(CommandHandler("versions", self._cmd_versions))
         self._app.add_handler(CommandHandler("review", self._cmd_review))
 
+        # Remote-control commands
+        self._app.add_handler(CommandHandler("live", self._cmd_live))
+        self._app.add_handler(CommandHandler("dryrun", self._cmd_dryrun))
+        self._app.add_handler(CommandHandler("scan", self._cmd_scan))
+        self._app.add_handler(CommandHandler("addpair", self._cmd_addpair))
+        self._app.add_handler(CommandHandler("removepair", self._cmd_removepair))
+        self._app.add_handler(CommandHandler("config", self._cmd_config))
+        self._app.add_handler(CommandHandler("setthreshold", self._cmd_setthreshold))
+
         await self._app.initialize()
         await self._app.start()
         await self._app.updater.start_polling(drop_pending_updates=True)
@@ -133,6 +142,14 @@ class TelegramBot:
             "/pause — Pause scanning\n"
             "/resume — Resume scanning\n"
             "/halt — Emergency halt\n\n"
+            "<b>Remote Control</b>\n"
+            "/live — Enable Claude-powered entries\n"
+            "/dryrun — Analysis only (no entries)\n"
+            "/scan — Trigger immediate scan cycle\n"
+            "/addpair PAIR — Add pair to watchlist\n"
+            "/removepair PAIR — Remove pair from watchlist\n"
+            "/config — Show current runtime config\n"
+            "/setthreshold REGIME VALUE — Adjust score threshold\n\n"
             "<b>Strategy</b>\n"
             "/strategy — Show active strategy\n"
             "/versions — List strategy versions\n"
@@ -469,6 +486,159 @@ class TelegramBot:
         )
 
     # ------------------------------------------------------------------
+    # Remote Control Commands
+    # ------------------------------------------------------------------
+
+    async def _cmd_live(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Enable live mode: Claude evaluates setups and opens trades."""
+        if not self._auth(update):
+            return
+        if not self.atlas:
+            await update.message.reply_text("Atlas not connected.")
+            return
+        self.atlas.live_mode = True
+        await update.message.reply_text(
+            "LIVE MODE enabled.\n"
+            "Claude will now evaluate setups and open paper trades.\n"
+            "Use /dryrun to return to analysis-only mode."
+        )
+
+    async def _cmd_dryrun(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Disable live mode: analysis and Telegram alerts only, no entries."""
+        if not self._auth(update):
+            return
+        if not self.atlas:
+            await update.message.reply_text("Atlas not connected.")
+            return
+        self.atlas.live_mode = False
+        await update.message.reply_text(
+            "DRY-RUN mode enabled.\n"
+            "Claude calls are disabled — analysis and alerts only."
+        )
+
+    async def _cmd_scan(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Request an immediate scan cycle (skips the 5-minute wait)."""
+        if not self._auth(update):
+            return
+        if not self.atlas:
+            await update.message.reply_text("Atlas not connected.")
+            return
+        if self.atlas.halted:
+            await update.message.reply_text("System is HALTED. Use /resume first.")
+            return
+        if self.atlas.paused:
+            await update.message.reply_text("System is PAUSED. Use /resume first.")
+            return
+        self.atlas._scan_requested = True
+        await update.message.reply_text("Immediate scan requested. Results incoming shortly.")
+
+    async def _cmd_addpair(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Add a pair to the watchlist: /addpair PAIR"""
+        if not self._auth(update):
+            return
+        args = ctx.args
+        if not args:
+            await update.message.reply_text("Usage: /addpair PAIR\nExample: /addpair XRPUSDT")
+            return
+        pair = args[0].upper()
+        if pair in config.PAIRS:
+            await update.message.reply_text(f"{pair} is already in the watchlist.")
+            return
+        config.PAIRS.append(pair)
+        await update.message.reply_text(
+            f"{pair} added to watchlist.\n"
+            f"Now monitoring: {', '.join(config.PAIRS)}"
+        )
+
+    async def _cmd_removepair(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Remove a pair from the watchlist: /removepair PAIR"""
+        if not self._auth(update):
+            return
+        args = ctx.args
+        if not args:
+            await update.message.reply_text("Usage: /removepair PAIR\nExample: /removepair XRPUSDT")
+            return
+        pair = args[0].upper()
+        if pair not in config.PAIRS:
+            await update.message.reply_text(f"{pair} is not in the watchlist.")
+            return
+        if len(config.PAIRS) <= 1:
+            await update.message.reply_text("Cannot remove last pair from watchlist.")
+            return
+        config.PAIRS.remove(pair)
+        await update.message.reply_text(
+            f"{pair} removed from watchlist.\n"
+            f"Now monitoring: {', '.join(config.PAIRS)}"
+        )
+
+    async def _cmd_config(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show current runtime configuration."""
+        if not self._auth(update):
+            return
+        live = self.atlas.live_mode if self.atlas else False
+        state = "HALTED" if (self.atlas and self.atlas.halted) else \
+                "PAUSED" if (self.atlas and self.atlas.paused) else "RUNNING"
+        msg = (
+            f"<b>ATLAS Runtime Config</b>\n"
+            f"Mode: {'LIVE' if live else 'DRY-RUN'}\n"
+            f"State: {state}\n"
+            f"Pairs: {', '.join(config.PAIRS)}\n\n"
+            f"<b>Score Thresholds</b>\n"
+            f"TRENDING: {config.SCORE_THRESHOLD_TRENDING}/9\n"
+            f"PULLBACK: {config.SCORE_THRESHOLD_PULLBACK}/9\n"
+            f"BREAKOUT: {config.SCORE_THRESHOLD_BREAKOUT}/9\n\n"
+            f"<b>Risk (hardcoded)</b>\n"
+            f"Max risk/trade: {config.MAX_RISK_PCT}%\n"
+            f"Max open trades: {config.MAX_SIMULTANEOUS_TRADES}\n"
+            f"Daily halt: -{config.DAILY_DRAWDOWN_HALT_PCT}%\n"
+            f"Min R:R: {config.MIN_RR_RATIO}\n\n"
+            f"<b>Timing</b>\n"
+            f"Scan interval: {config.SCAN_INTERVAL_SECONDS}s\n"
+            f"Max trade hours: {config.MAX_TRADE_HOURS}h\n"
+            f"Active strategy: {config.ACTIVE_STRATEGY_FILE}"
+        )
+        await update.message.reply_text(msg, parse_mode="HTML")
+
+    async def _cmd_setthreshold(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Adjust a score threshold: /setthreshold REGIME VALUE"""
+        if not self._auth(update):
+            return
+        args = ctx.args
+        if not args or len(args) < 2:
+            await update.message.reply_text(
+                "Usage: /setthreshold REGIME VALUE\n"
+                "Regimes: TRENDING, PULLBACK, BREAKOUT\n"
+                "Example: /setthreshold PULLBACK 5"
+            )
+            return
+        regime = args[0].upper()
+        try:
+            value = int(args[1])
+        except ValueError:
+            await update.message.reply_text("Value must be an integer (1-9).")
+            return
+        if value < 1 or value > 9:
+            await update.message.reply_text("Threshold must be between 1 and 9.")
+            return
+        if regime == "TRENDING":
+            config.SCORE_THRESHOLD_TRENDING = value
+        elif regime == "PULLBACK":
+            config.SCORE_THRESHOLD_PULLBACK = value
+        elif regime == "BREAKOUT":
+            config.SCORE_THRESHOLD_BREAKOUT = value
+        else:
+            await update.message.reply_text(
+                f"Unknown regime: {regime}\nValid: TRENDING, PULLBACK, BREAKOUT"
+            )
+            return
+        await update.message.reply_text(
+            f"Threshold updated: {regime} → {value}/9\n"
+            f"TRENDING={config.SCORE_THRESHOLD_TRENDING} "
+            f"PULLBACK={config.SCORE_THRESHOLD_PULLBACK} "
+            f"BREAKOUT={config.SCORE_THRESHOLD_BREAKOUT}"
+        )
+
+    # ------------------------------------------------------------------
     # Strategy Commands
     # ------------------------------------------------------------------
 
@@ -561,6 +731,8 @@ if __name__ == "__main__":
         "_cmd_history", "_cmd_performance", "_cmd_regime",
         "_cmd_enter", "_cmd_close", "_cmd_closehalf", "_cmd_movestop",
         "_cmd_pause", "_cmd_resume", "_cmd_halt",
+        "_cmd_live", "_cmd_dryrun", "_cmd_scan",
+        "_cmd_addpair", "_cmd_removepair", "_cmd_config", "_cmd_setthreshold",
         "_cmd_strategy", "_cmd_versions", "_cmd_review",
     ]
     for h in handlers:

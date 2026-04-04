@@ -35,8 +35,10 @@ class AtlasLean:
         self.pm = PositionManager()
         self.paused = False
         self.halted = False
+        self.live_mode = False  # False = analysis only; True = Claude calls + trade entry
         self._telegram = None  # Set externally by telegram_bot
         self._cycle_count = 0
+        self._scan_requested = False  # Set by /scan command for immediate cycle
 
     def set_telegram(self, telegram_bot) -> None:
         """Inject Telegram bot for notifications."""
@@ -138,8 +140,9 @@ class AtlasLean:
                     })
 
                     # Log signal to DB if score >= MIN_SCORE_LOG
+                    signal_id = None
                     if score >= config.MIN_SCORE_LOG:
-                        db.insert_signal(
+                        signal_id = db.insert_signal(
                             pair=pair,
                             regime=regime,
                             score=score,
@@ -158,13 +161,41 @@ class AtlasLean:
                         )
                         would_call_claude = False
 
-                    # Step 5: Send detailed analysis to Telegram if would have called Claude
+                    # Step 5: Call Claude (live mode) or send analysis (dry-run)
                     if would_call_claude:
-                        await self._send_analysis(
-                            pair, regime, regime_result,
-                            signal_result, indicators_summary,
-                            threshold, would_call_claude,
-                        )
+                        if self.live_mode:
+                            decision = await self.claude.evaluate_entry(
+                                pair=pair,
+                                regime=regime,
+                                score=score,
+                                signals=signal_result.signals,
+                                indicators=indicators_summary,
+                                open_trades_count=open_count,
+                            )
+                            summary["claude_calls"] += 1
+                            if signal_id is not None:
+                                db.update_signal_claude(
+                                    signal_id,
+                                    decision.action,
+                                    decision.reasoning,
+                                    decision.confidence,
+                                )
+                            if decision.action == "ENTER":
+                                await self._open_trade_from_decision(
+                                    pair, regime, decision,
+                                    signal_id or 0, indicators_summary, summary,
+                                )
+                            await self._send_analysis(
+                                pair, regime, regime_result,
+                                signal_result, indicators_summary,
+                                threshold, would_call_claude, decision,
+                            )
+                        else:
+                            await self._send_analysis(
+                                pair, regime, regime_result,
+                                signal_result, indicators_summary,
+                                threshold, would_call_claude,
+                            )
 
                 except Exception as e:
                     logger.error("Error processing %s: %s", pair, e, exc_info=True)
@@ -219,14 +250,20 @@ class AtlasLean:
         self, pair: str, regime: str, regime_result,
         signal_result, indicators: dict,
         threshold: int, would_call_claude: bool,
+        decision=None,
     ) -> None:
         """Format and send full signal analysis to Telegram."""
         score = signal_result.score
         price = indicators.get("price", 0)
         conf = regime_result.confidence
 
-        # Header
-        verdict = "WOULD CALL CLAUDE" if would_call_claude else f"score {score}/{threshold} needed"
+        # Header — show Claude's actual verdict in live mode, else dry-run label
+        if decision is not None:
+            verdict = f"CLAUDE: {decision.action} ({decision.confidence})"
+        elif would_call_claude:
+            verdict = "DRY-RUN (analysis only)"
+        else:
+            verdict = f"score {score}/{threshold} needed"
         lines = [
             f"<b>{'🔔 ' if would_call_claude else ''}SIGNAL ANALYSIS — {pair}</b>",
             f"Price: <b>${price:,.2f}</b>  |  Cycle #{self._cycle_count}",
@@ -461,14 +498,14 @@ class AtlasLean:
             logger.info("Auto-stop in %ds", max_runtime)
 
         start_time = time.monotonic()
-        run_label = "DRY-RUN (analysis only, Claude disabled)"
+        run_label = "LIVE (Claude-powered entries)" if self.live_mode else "DRY-RUN (analysis only)"
         await self.notify(
             f"ATLAS Lean v2.0 started — {run_label}\n"
             f"Monitoring: {', '.join(config.PAIRS)}\n"
             f"Every 5 min you'll receive:\n"
-            f"  • Cycle summary (all 6 pairs)\n"
+            f"  • Cycle summary (all pairs)\n"
             f"  • Full analysis for pairs hitting threshold\n"
-            f"Auto-stop in 1 hour."
+            + (f"Auto-stop in {max_runtime // 60}min." if max_runtime else "Running indefinitely.")
         )
 
         while True:
@@ -483,18 +520,23 @@ class AtlasLean:
             if max_runtime and (time.monotonic() - start_time) >= max_runtime:
                 logger.info("Max runtime reached — stopping")
                 await self.notify(
-                    f"1-hour observation complete.\n"
+                    f"Auto-stop reached.\n"
                     f"Ran {self._cycle_count} cycles.\n"
                     f"ATLAS stopped."
                 )
                 break
 
-            # Sleep for remainder of interval
+            # Sleep for remainder of interval, waking early if /scan was requested
             elapsed = time.monotonic() - cycle_start
             sleep_time = max(0, config.SCAN_INTERVAL_SECONDS - elapsed)
-            if sleep_time > 0:
-                logger.debug("Sleeping %.1fs until next cycle", sleep_time)
-                await asyncio.sleep(sleep_time)
+            slept = 0.0
+            while slept < sleep_time:
+                if self._scan_requested:
+                    self._scan_requested = False
+                    logger.info("Immediate scan requested via Telegram")
+                    break
+                await asyncio.sleep(1)
+                slept += 1
 
     async def close(self) -> None:
         """Cleanup resources."""
