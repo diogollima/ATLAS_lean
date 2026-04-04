@@ -109,6 +109,21 @@ def _check_trending(
     if cond2:
         checks_passed += 1
 
+    # ADX + CHOP regime gates (must both pass for TRENDING to qualify)
+    # ADX > 25 confirms a strong directional move; CHOP < 38.2 confirms non-choppy
+    adx_4h = _latest(df_4h, "adx14")
+    chop_4h = _latest(df_4h, "chop14")
+    adx_ok  = adx_4h is not None and adx_4h > 25
+    chop_ok = chop_4h is not None and chop_4h < 38.2
+    conditions["adx14_4h"] = round(adx_4h, 1) if adx_4h else None
+    conditions["chop14_4h"] = round(chop_4h, 1) if chop_4h else None
+    if not (adx_ok and chop_ok):
+        # Market is not genuinely trending — skip remaining checks
+        return False, 0.0, {
+            "reason": f"ADX/CHOP regime gate failed: ADX={adx_4h:.1f if adx_4h else 'N/A'} (need >25), CHOP={chop_4h:.1f if chop_4h else 'N/A'} (need <38.2)",
+            **conditions,
+        }
+
     # 3. ATR expanding on 4H
     atr_4h = _latest(df_4h, "atr14")
     atr_avg_4h = _latest(df_4h, "atr14_sma20")
@@ -189,6 +204,23 @@ def _check_pullback(
         return False, 0.0, {"reason": "macro trend not intact"}
 
     conditions["macro_trend_intact"] = True
+
+    # ADX + CHOP regime gates for PULLBACK
+    # ADX < 20 = price is in a non-directional phase (pullback, not free-fall)
+    # CHOP > 61.8 = consolidating, not a new trend leg starting
+    adx_1h = _latest(df_1h, "adx14")
+    chop_1h = _latest(df_1h, "chop14")
+    # ADX < 25: not in a strong directional move (pullback = slowing, not free-falling)
+    # CHOP > 55: some consolidation (strict 61.8 blocks pullbacks in transition phases)
+    adx_ranging  = adx_1h is not None and adx_1h < 25
+    chop_ranging = chop_1h is not None and chop_1h > 55
+    conditions["adx14_1h"] = round(adx_1h, 1) if adx_1h else None
+    conditions["chop14_1h"] = round(chop_1h, 1) if chop_1h else None
+    if not (adx_ranging and chop_ranging):
+        return False, 0.0, {
+            "reason": f"ADX/CHOP gate failed: ADX={adx_1h:.1f if adx_1h else 'N/A'} (need <25), CHOP={chop_1h:.1f if chop_1h else 'N/A'} (need >55)",
+            **conditions,
+        }
 
     # 1. Price within 1.5% of EMA50 on 4H OR at swing low support
     if price_4h and ema50_4h and ema50_4h > 0:

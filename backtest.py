@@ -153,6 +153,34 @@ def bollinger(s: pd.Series, n: int = 20) -> tuple[pd.Series, pd.Series, pd.Serie
     std  = s.rolling(n).std()
     return mid - 2*std, mid, mid + 2*std
 
+def adx(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Average Directional Index. < 20 = ranging; > 25 = strong trend."""
+    up   = df["high"].diff()
+    down = -df["low"].diff()
+    plus_dm  = up.where((up > down) & (up > 0), 0.0)
+    minus_dm = down.where((down > up) & (down > 0), 0.0)
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift()).abs(),
+        (df["low"]  - df["close"].shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr_w    = tr.ewm(alpha=1/n, adjust=False).mean()
+    plus_di  = 100 * plus_dm.ewm(alpha=1/n, adjust=False).mean() / atr_w.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1/n, adjust=False).mean() / atr_w.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    return dx.ewm(alpha=1/n, adjust=False).mean()
+
+def choppiness(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    """Choppiness Index. > 61.8 = consolidating; < 38.2 = trending strongly."""
+    tr = pd.concat([
+        df["high"] - df["low"],
+        (df["high"] - df["close"].shift()).abs(),
+        (df["low"]  - df["close"].shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr_sum = tr.rolling(n).sum()
+    range_n = df["high"].rolling(n).max() - df["low"].rolling(n).min()
+    return 100 * np.log10(atr_sum / range_n.replace(0, np.nan)) / np.log10(n)
+
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     c = df["close"]
@@ -173,6 +201,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_ratio"] = df["volume"] / df["vol_sma"].replace(0, np.nan)
     # Taker buy proxy: tbv / volume (historical aggTrades unavailable)
     df["taker_proxy"] = df["tbv"] / df["volume"].replace(0, np.nan)
+    # Regime detection
+    df["adx14"]  = adx(df, 14)
+    df["chop14"] = choppiness(df, 14)
     return df
 
 
@@ -295,29 +326,42 @@ def detect_regime_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame) -> str:
     else:
         above4 = False
 
-    # PULLBACK: above EMA200, pulled back near EMA50, RSI in 30-55, BB%b < 0.4
-    # Also require 4H EMA50 > 4H EMA200 — confirms macro uptrend, not a bounce
-    # in a downtrend where EMA50 is below EMA200 (would be resistance, not support)
+    adx_v  = row_1h["adx14"]
+    chop_v = row_1h["chop14"]
+
+    # PULLBACK: macro uptrend + price near EMA50 + RSI in pullback zone +
+    #           ADX < 20 (not in free-fall) + CHOP > 61.8 (consolidating)
     near_ema50 = (not np.isnan(ema50) and
                   abs(price - ema50) / ema50 < 0.025)
     macro_up_4h = (len(df_4h_slice) >= 1 and
                    not np.isnan(df_4h_slice.iloc[-1].get("ema50", np.nan)) and
                    not np.isnan(df_4h_slice.iloc[-1].get("ema200", np.nan)) and
                    df_4h_slice.iloc[-1]["ema50"] > df_4h_slice.iloc[-1]["ema200"])
-    is_pullback = (above4 and near_ema50 and macro_up_4h and
+    # ADX < 25 (not in a strong directional move — price slowing down, not free-falling)
+    # CHOP > 55 (some consolidation; strict 61.8 blocks pullbacks in transition phases)
+    adx_ranging  = not np.isnan(adx_v)  and adx_v  < 25
+    chop_ranging = not np.isnan(chop_v) and chop_v > 55
+    is_pullback = (above4 and near_ema50 and macro_up_4h and adx_ranging and chop_ranging and
                    not np.isnan(rsi_v) and 28 <= rsi_v <= 55 and
                    not np.isnan(bb_b) and bb_b < 0.40)
 
-    # TRENDING: above both EMAs, RSI 50-75, ATR expanding
+    # TRENDING: above both EMAs, RSI 50-75, ATR expanding +
+    #           ADX > 25 (confirmed directional move) + CHOP < 38.2 (not choppy)
+    # Re-enabled with proper regime guards (previously 14% win rate without them)
+    adx_4h_v  = df_4h_slice.iloc[-1].get("adx14", np.nan)  if len(df_4h_slice) >= 1 else np.nan
+    chop_4h_v = df_4h_slice.iloc[-1].get("chop14", np.nan) if len(df_4h_slice) >= 1 else np.nan
+    adx_trending  = not np.isnan(adx_4h_v)  and adx_4h_v  > 25
+    chop_trending = not np.isnan(chop_4h_v) and chop_4h_v < 38.2
     is_trending = (not np.isnan(ema50) and price > ema50 and
                    not np.isnan(ema200) and price > ema200 and
                    not np.isnan(rsi_v) and 50 <= rsi_v <= 75 and
-                   not np.isnan(atr_v) and not np.isnan(atr_s) and atr_v >= atr_s)
+                   not np.isnan(atr_v) and not np.isnan(atr_s) and atr_v >= atr_s and
+                   adx_trending and chop_trending)
 
     if is_pullback:
         return "PULLBACK"
-    # TRENDING disabled: entries fire too late in momentum (peak-chasing)
-    # Claude + human review works better in live; backtest shows 14% win rate
+    if is_trending:
+        return "TRENDING"
     return "RANGING"
 
 

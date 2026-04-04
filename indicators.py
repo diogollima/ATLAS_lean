@@ -119,6 +119,24 @@ def _add_indicators(df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
     # --- ATR expansion rate ---
     df["atr_expansion"] = df["atr14"] / df["atr14"].shift(5).replace(0, np.nan)
 
+    # --- Regime Detection: ADX (Average Directional Index) ---
+    # ADX < 20 = ranging/non-trending; ADX > 25 = strong trend confirmed
+    adx_result = ta.adx(df["high"], df["low"], df["close"], length=14)
+    if adx_result is not None and not adx_result.empty:
+        df["adx14"]   = adx_result.iloc[:, 0]  # ADX_14 — trend strength
+        df["adx_pos"] = adx_result.iloc[:, 1]  # DMP_14 — +DI (bullish directional move)
+        df["adx_neg"] = adx_result.iloc[:, 2]  # DMN_14 — -DI (bearish directional move)
+    else:
+        df["adx14"] = df["adx_pos"] = df["adx_neg"] = np.nan
+
+    # --- Regime Detection: Choppiness Index ---
+    # CHOP > 61.8 (Fibonacci) = choppy/ranging; CHOP < 38.2 = trending strongly
+    chop = ta.chop(df["high"], df["low"], df["close"], length=14)
+    if chop is not None:
+        df["chop14"] = chop
+    else:
+        df["chop14"] = np.nan
+
     return df
 
 
@@ -410,6 +428,19 @@ def summarize_indicators(
         if bbw and bbw_avg and bbw_avg > 0:
             summary["bb_width_vs_avg_4h"] = round(bbw / bbw_avg, 3)
 
+    # --- Regime detection indicators: ADX + Choppiness Index ---
+    # These are the primary regime gates used by regime_detector.py
+    # ADX < 20 = ranging  |  ADX > 25 = trending
+    # CHOP > 61.8 = consolidating  |  CHOP < 38.2 = trending strongly
+    for tf in ["1h", "4h"]:
+        df = klines.get(tf)
+        if df is None:
+            continue
+        summary[f"adx14_{tf}"]  = _safe_latest(df, "adx14", 1)
+        summary[f"adx_pos_{tf}"] = _safe_latest(df, "adx_pos", 1)
+        summary[f"adx_neg_{tf}"] = _safe_latest(df, "adx_neg", 1)
+        summary[f"chop14_{tf}"] = _safe_latest(df, "chop14", 1)
+
     # --- Volume metrics (already computed) ---
     summary.update(volume_metrics)
 
@@ -495,6 +526,36 @@ def _build_interpretations(summary: dict) -> dict:
             interp["taker_bias"] = f"taker buy {tbr:.2f} — neutral"
         else:
             interp["taker_bias"] = f"taker buy {tbr:.2f} — seller dominated"
+
+    # ADX interpretation (1H)
+    adx = summary.get("adx14_1h")
+    if adx is not None:
+        if adx < 20:
+            interp["adx_1h"] = f"ADX {adx:.0f} — non-trending, ranging market (use mean-reversion)"
+        elif adx < 25:
+            interp["adx_1h"] = f"ADX {adx:.0f} — weak trend developing"
+        elif adx < 50:
+            interp["adx_1h"] = f"ADX {adx:.0f} — strong trend confirmed (use trend-following)"
+        else:
+            interp["adx_1h"] = f"ADX {adx:.0f} — very strong trend"
+
+    # ADX interpretation (4H)
+    adx4 = summary.get("adx14_4h")
+    if adx4 is not None:
+        if adx4 < 20:
+            interp["adx_4h"] = f"ADX {adx4:.0f} — ranging 4H"
+        elif adx4 >= 25:
+            interp["adx_4h"] = f"ADX {adx4:.0f} — trending 4H"
+
+    # Choppiness Index interpretation (1H)
+    chop = summary.get("chop14_1h")
+    if chop is not None:
+        if chop > 61.8:
+            interp["chop_1h"] = f"CHOP {chop:.1f} — consolidating / ranging (above 61.8 Fibonacci)"
+        elif chop < 38.2:
+            interp["chop_1h"] = f"CHOP {chop:.1f} — trending strongly (below 38.2 Fibonacci)"
+        else:
+            interp["chop_1h"] = f"CHOP {chop:.1f} — transitional / indeterminate"
 
     # Order book
     ob = summary.get("ob_bid_pct")
