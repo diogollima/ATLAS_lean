@@ -1,0 +1,6 @@
+.env
+atlas.db
+__pycache__/
+*.pyc
+strategy_v*.md
+!strategy_v1.md
