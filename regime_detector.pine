@@ -1,0 +1,209 @@
+//@version=5
+indicator("ATLAS Lean Regime Detector", overlay=true, max_bars_back=5000)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATLAS Lean v2.0 — Regime Detector for TradingView
+//
+// Visualizes PULLBACK, TRENDING, and RANGING regimes
+// Matches exact backtest logic for validation
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Input parameters
+group_ma = "Moving Averages"
+ema50_len = input.int(50, "EMA50 Length", group=group_ma)
+ema200_len = input.int(200, "EMA200 Length", group=group_ma)
+ema20_daily_len = input.int(21, "Daily EMA21 Length (for macro filter)", group=group_ma)
+
+group_momentum = "Momentum"
+rsi_len = input.int(14, "RSI Length", group=group_momentum)
+rsi_pullback_min = input.int(28, "RSI Pullback Min", group=group_momentum)
+rsi_pullback_max = input.int(55, "RSI Pullback Max", group=group_momentum)
+rsi_trending_min = input.int(50, "RSI Trending Min", group=group_momentum)
+rsi_trending_max = input.int(75, "RSI Trending Max", group=group_momentum)
+
+group_bb = "Bollinger Bands"
+bb_len = input.int(20, "BB Length", group=group_bb)
+bb_mult = input.float(2.0, "BB Multiplier", group=group_bb)
+bb_pctb_threshold = input.float(0.40, "BB %B Threshold (Pullback)", group=group_bb)
+
+group_atr = "Volatility (ATR)"
+atr_len = input.int(14, "ATR Length", group=group_atr)
+atr_sma_len = input.int(20, "ATR SMA Length", group=group_atr)
+
+group_adx = "ADX / Choppiness"
+adx_len = input.int(14, "ADX Length", group=group_adx)
+adx_pullback_max = input.float(25.0, "ADX Max (Pullback = <25)", group=group_adx)
+adx_trending_min = input.float(25.0, "ADX Min (Trending = >25)", group=group_adx)
+
+chop_len = input.int(14, "Choppiness Length", group=group_adx)
+chop_pullback_min = input.float(55.0, "CHOP Min (Pullback = >55)", group=group_adx)
+chop_trending_max = input.float(38.2, "CHOP Max (Trending = <38.2)", group=group_adx)
+
+group_daily = "Daily Macro Filter"
+use_daily_filter = input.bool(true, "Enable Daily EMA Filter", group=group_daily)
+daily_ema21_len = input.int(21, "Daily EMA21 Length", group=group_daily)
+daily_ema50_len = input.int(50, "Daily EMA50 Length", group=group_daily)
+
+group_display = "Display"
+show_mas = input.bool(true, "Show MAs (EMA50, EMA200)", group=group_display)
+show_rsi = input.bool(false, "Show RSI Zones", group=group_display)
+show_adx_chop = input.bool(true, "Show ADX & CHOP", group=group_display)
+show_regimes = input.bool(true, "Show Regime Backgrounds", group=group_display)
+show_signals = input.bool(true, "Show Entry Signals", group=group_display)
+
+// ─── Calculations ─────────────────────────────────────────────────────────
+
+// Moving Averages
+ema50 = ta.ema(close, ema50_len)
+ema200 = ta.ema(close, ema200_len)
+
+// Momentum
+rsi = ta.rsi(close, rsi_len)
+
+// Bollinger Bands
+bb_basis = ta.sma(close, bb_len)
+bb_dev = ta.stdev(close, bb_len)
+bb_upper = bb_basis + bb_mult * bb_dev
+bb_lower = bb_basis - bb_mult * bb_dev
+bb_pctb = (close - bb_lower) / (bb_upper - bb_lower)
+
+// Volatility
+atr_val = ta.atr(atr_len)
+atr_sma = ta.sma(atr_val, atr_sma_len)
+
+// ADX (Average Directional Index)
+adx_result = ta.adx(adx_len)
+adx_val = adx_result
+
+// Choppiness Index
+f_choppiness(len) =>
+    _hl = ta.highest(high, len) - ta.lowest(low, len)
+    _tr = ta.atr(1)
+    _atr_sum = ta.sum(_tr, len)
+    100.0 * math.log10(_atr_sum / _hl) / math.log10(len)
+
+chop_val = f_choppiness(chop_len)
+
+// Daily Macro Filter
+daily_ema21 = request.security(syminfo.tickerid, "D", ta.ema(close, daily_ema21_len))
+daily_ema50 = request.security(syminfo.tickerid, "D", ta.ema(close, daily_ema50_len))
+daily_close = request.security(syminfo.tickerid, "D", close)
+
+macro_bullish = daily_close > daily_ema21 and daily_ema21 > daily_ema50
+
+// ─── Regime Detection ─────────────────────────────────────────────────────
+
+// PULLBACK Regime
+pullback_price_structure = (
+    close > ema200 and
+    math.abs(close - ema50) / ema50 < 0.025 and
+    rsi >= rsi_pullback_min and rsi <= rsi_pullback_max and
+    bb_pctb < bb_pctb_threshold
+)
+
+pullback_regime = (
+    close > ema50 and
+    pullback_price_structure and
+    adx_val < adx_pullback_max and
+    chop_val > chop_pullback_min
+)
+
+is_pullback = pullback_regime and (not use_daily_filter or macro_bullish)
+
+// TRENDING Regime
+trending_price_structure = (
+    close > ema50 and
+    close > ema200 and
+    rsi >= rsi_trending_min and rsi <= rsi_trending_max and
+    atr_val >= atr_sma
+)
+
+trending_regime = (
+    trending_price_structure and
+    adx_val > adx_trending_min and
+    chop_val < chop_trending_max
+)
+
+is_trending = trending_regime and (not use_daily_filter or macro_bullish)
+
+// RANGING (default)
+is_ranging = not is_pullback and not is_trending
+
+// ─── Plot Backgrounds ─────────────────────────────────────────────────────
+
+if show_regimes
+    if is_pullback
+        bgcolor(color.new(color.green, 85), title="PULLBACK")
+    else if is_trending
+        bgcolor(color.new(color.blue, 85), title="TRENDING")
+    else if is_ranging
+        bgcolor(color.new(color.gray, 88), title="RANGING")
+
+// ─── Plot Moving Averages ────────────────────────────────────────────────────
+
+if show_mas
+    plot(ema50, title="EMA50", color=color.orange, linewidth=2)
+    plot(ema200, title="EMA200", color=color.red, linewidth=2)
+
+// ─── Plot ADX & Choppiness ───────────────────────────────────────────────────
+
+if show_adx_chop
+    // ADX on separate panel (right scale)
+    adx_line = plot(adx_val, title="ADX(14)", color=color.purple, linewidth=1)
+    plot(adx_pullback_max, title="ADX Threshold (25)", color=color.purple, style=plot.style_dashed, linewidth=1)
+
+    // Choppiness on separate panel
+    chop_line = plot(chop_val, title="CHOP(14)", color=color.teal, linewidth=1)
+    plot(chop_pullback_min, title="CHOP Pullback (55)", color=color.teal, style=plot.style_dashed, linewidth=1)
+    plot(chop_trending_max, title="CHOP Trending (38.2)", color=color.teal, style=plot.style_dotted, linewidth=1)
+
+// ─── Plot RSI Zones ─────────────────────────────────────────────────────────
+
+if show_rsi
+    hline(rsi_pullback_min, "RSI Pullback Min", color=color.green, linestyle=hline.style_dashed)
+    hline(rsi_pullback_max, "RSI Pullback Max", color=color.green, linestyle=hline.style_dashed)
+    hline(rsi_trending_min, "RSI Trending Min", color=color.blue, linestyle=hline.style_dashed)
+    hline(rsi_trending_max, "RSI Trending Max", color=color.blue, linestyle=hline.style_dashed)
+    hline(50, "RSI Midline", color=color.gray, linestyle=hline.style_dashed)
+    plot(rsi, title="RSI(14)", color=color.new(color.gray, 0))
+
+// ─── Entry Signals ───────────────────────────────────────────────────────────
+
+if show_signals
+    plotshape(is_pullback and not is_pullback[1], "PULLBACK Signal", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.small)
+    plotshape(is_trending and not is_trending[1], "TRENDING Signal", shape.triangleup, location.belowbar, color.new(color.blue, 0), size=size.small)
+
+// ─── Daily Filter Alert ───────────────────────────────────────────────────────
+
+if use_daily_filter and not macro_bullish
+    alert_txt = "⚠️ Daily Filter: " + (daily_close > daily_ema21 ? "Below EMA21" : "EMA21<EMA50")
+    label.new(bar_index, high, alert_txt, color=color.new(color.red, 60), textcolor=color.white, style=label.style_label_down)
+
+// ─── Table Summary ─────────────────────────────────────────────────────────
+
+var table summary = table.new(position.top_right, 2, 6, border_color=color.gray, frame_color=color.gray)
+
+if barstate.islast
+    // Current regime
+    regime_txt = is_pullback ? "🟢 PULLBACK" : is_trending ? "🔵 TRENDING" : "⚫ RANGING"
+    regime_color = is_pullback ? color.green : is_trending ? color.blue : color.gray
+
+    table.cell(summary, 0, 0, "Regime", bgcolor=color.new(color.black, 80), text_color=color.white)
+    table.cell(summary, 1, 0, regime_txt, bgcolor=color.new(regime_color, 60), text_color=color.white)
+
+    table.cell(summary, 0, 1, "RSI", text_color=color.white)
+    table.cell(summary, 1, 1, str.tostring(rsi, "#.0"), text_color=color.white)
+
+    table.cell(summary, 0, 2, "ADX", text_color=color.white)
+    table.cell(summary, 1, 2, str.tostring(adx_val, "#.0"), text_color=color.white)
+
+    table.cell(summary, 0, 3, "CHOP", text_color=color.white)
+    table.cell(summary, 1, 3, str.tostring(chop_val, "#.0"), text_color=color.white)
+
+    table.cell(summary, 0, 4, "Daily Filter", text_color=color.white)
+    table.cell(summary, 1, 4, macro_bullish ? "✅ OK" : "❌ Blocked", text_color=macro_bullish ? color.green : color.red)
+
+    table.cell(summary, 0, 5, "Price/EMA50", text_color=color.white)
+    dist = (close - ema50) / ema50 * 100
+    table.cell(summary, 1, 5, str.tostring(dist, "#.0") + "%", text_color=color.white)
+

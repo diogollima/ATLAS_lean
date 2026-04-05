@@ -479,6 +479,15 @@ async def run_backtest():
     equity = ACCOUNT_USDT
     equity_curve: list[tuple]    = [(eval_idx[0], equity)]
 
+    # Debug counters
+    debug_stats = {
+        "total_bars_evaluated": 0,
+        "failed_daily_filter": 0,
+        "ranging_regime": 0,
+        "failed_score_threshold": 0,
+        "valid_entries": 0,
+    }
+
     for ts in eval_idx:
         # ── Manage existing open positions ──────────────────────────────────
         to_close = []
@@ -595,6 +604,8 @@ async def run_backtest():
             if len(df4_sl) < 5:
                 continue
 
+            debug_stats["total_bars_evaluated"] += 1
+
             # ── Daily trend filter: require 1D close > 1D EMA21 ──────────────
             # Blocks entries during macro downtrends even when 1H/4H look OK
             if pair in hist_1d:
@@ -606,14 +617,17 @@ async def run_backtest():
                     daily_close = last_1d["close"]
                     # Skip if price is below daily EMA21 OR daily EMA21 < daily EMA50
                     if (not np.isnan(daily_ema21) and daily_close < daily_ema21):
+                        debug_stats["failed_daily_filter"] += 1
                         continue
                     if (not np.isnan(daily_ema21) and not np.isnan(daily_ema50)
                             and daily_ema21 < daily_ema50):
+                        debug_stats["failed_daily_filter"] += 1
                         continue
 
             # Detect regime
             regime = detect_regime_bar(row1, df4_sl)
             if regime == "RANGING":
+                debug_stats["ranging_regime"] += 1
                 continue
 
             # Score signals
@@ -621,7 +635,10 @@ async def run_backtest():
             threshold   = thresholds.get(regime, 999)
 
             if score < threshold:
+                debug_stats["failed_score_threshold"] += 1
                 continue
+
+            debug_stats["valid_entries"] += 1
 
             # Valid entry — size position
             entry     = row1["close"]
@@ -722,6 +739,17 @@ async def run_backtest():
         by_pair[p]["n"]    += 1
         by_pair[p]["r"]    += r["r"]
         by_pair[p]["wins"] += int(r["r"] > 0)
+
+    # ── Debug output ──────────────────────────────────────────────────────────
+    print("\n" + "="*65)
+    print("  FILTER ANALYSIS")
+    print("="*65)
+    print(f"  Total bars evaluated:      {debug_stats['total_bars_evaluated']:,}")
+    print(f"  ├─ Failed daily filter:    {debug_stats['failed_daily_filter']:,}")
+    print(f"  ├─ Detected as RANGING:    {debug_stats['ranging_regime']:,}")
+    print(f"  ├─ Failed score threshold: {debug_stats['failed_score_threshold']:,}")
+    print(f"  └─ Valid entry candidates: {debug_stats['valid_entries']}")
+    print(f"  Actual trades opened:      {n}")
 
     # ── Console output ────────────────────────────────────────────────────────
     print("\n" + "="*65)

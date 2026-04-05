@@ -1,0 +1,201 @@
+═══════════════════════════════════════════════════════════════════════════════
+  ATLAS LEAN v2.0 — EXACT REGIME CONDITIONS
+  (Copy-paste these conditions directly into TradingView alerts or external systems)
+═══════════════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────────────
+ PULLBACK REGIME
+──────────────────────────────────────────────────────────────────────────────
+
+ENTRY REQUIRES ALL conditions to be TRUE:
+
+ 1. PRICE STRUCTURE (1H Timeframe)
+    ├─ close > ema200                                  [price above 200-bar EMA]
+    ├─ close ∈ [ema50 × 0.975 to ema50 × 1.025]       [price within 2.5% of 50-bar EMA]
+    ├─ rsi ≥ 28 AND rsi ≤ 55                           [RSI in pullback mode]
+    └─ bb_pctb < 0.40                                  [price closer to lower Bollinger Band]
+
+ 2. MACRO CONTEXT (4H Timeframe)
+    ├─ close_4h > ema50_4h                            [4H price above 50-bar EMA]
+    └─ ema50_4h > ema200_4h                           [4H 50-EMA > 200-EMA, confirms uptrend]
+
+ 3. REGIME CONFIRMATION (1H & 4H)
+    ├─ adx14 < 25                                     [not in strong directional move]
+    └─ chop14 > 55                                    [market consolidating/choppy]
+
+ 4. DAILY MACRO FILTER (D Timeframe) — blocks most entries
+    ├─ daily_close > daily_ema21                      [daily price above 21-bar EMA]
+    └─ daily_ema21 > daily_ema50                      [21-EMA > 50-EMA, macro bullish]
+
+ ✓ PULLBACK ENTRY FIRES when:
+   All price structure + all macro + all regime + all daily = TRUE
+
+ Typical Pattern: ██████ (support) ▼ (pullback) ↓ ▼ (dip buy) ↑ (recovery)
+
+
+──────────────────────────────────────────────────────────────────────────────
+ TRENDING REGIME
+──────────────────────────────────────────────────────────────────────────────
+
+ENTRY REQUIRES ALL conditions to be TRUE:
+
+ 1. PRICE STRUCTURE (1H Timeframe)
+    ├─ close > ema50                                  [price above 50-bar EMA]
+    ├─ close > ema200                                 [price above 200-bar EMA]
+    ├─ rsi ≥ 50 AND rsi ≤ 75                          [RSI in momentum mode]
+    └─ atr14 ≥ atr_sma20                              [volatility expanding, not contracting]
+
+ 2. REGIME CONFIRMATION (4H Timeframe)
+    ├─ adx14_4h > 25                                  [strong directional move]
+    └─ chop14_4h < 38.2                               [strongly trending, not choppy]
+
+ 3. DAILY MACRO FILTER (D Timeframe)
+    ├─ daily_close > daily_ema21                      [daily price above 21-bar EMA]
+    └─ daily_ema21 > daily_ema50                      [21-EMA > 50-EMA, macro bullish]
+
+ ✓ TRENDING ENTRY FIRES when:
+   All price structure + all regime + all daily = TRUE
+
+ Typical Pattern: ██████ (uptrend) ↗ (momentum) → ↗ (continue up)
+
+
+──────────────────────────────────────────────────────────────────────────────
+ RANGING REGIME
+──────────────────────────────────────────────────────────────────────────────
+
+DEFAULT state when PULLBACK and TRENDING conditions are NOT met.
+
+Examples:
+ • Downtrends (daily EMA21 < EMA50)
+ • Sideways consolidation without pullback setup
+ • Choppy markets (CHOP > 61.8)
+ • Weak trends (ADX < 20)
+ • Oversold (RSI < 28) or overbought (RSI > 75) extremes
+
+ ❌ NO ENTRIES in RANGING regime (backtest shows low win rate)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+  INDICATOR THRESHOLDS QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════════════════
+
+MOVING AVERAGES
+├─ EMA50 (1H):     Support/resistance for pullbacks
+├─ EMA200 (1H):    Long-term uptrend confirmation
+├─ EMA50 (4H):     Macro uptrend baseline
+├─ EMA200 (4H):    Macro trend direction
+└─ EMA21 (Daily):  Macro filter; blocks entries when broken
+
+MOMENTUM (RSI)
+├─ RSI < 28:       Oversold (avoid, risk of continued selling)
+├─ 28-55:          PULLBACK safe zone (dip buying)
+├─ 50-75:          TRENDING zone (momentum riding)
+└─ RSI > 75:       Overbought (exhaustion risk)
+
+VOLATILITY
+├─ ATR(14):        Absolute volatility magnitude
+├─ ATR SMA(20):    Volatility baseline
+├─ ATR ≥ SMA:      Expanding volatility (good for TRENDING)
+└─ ATR < SMA:      Contracting volatility (avoid)
+
+TREND STRENGTH
+├─ ADX < 20:       Weak or no trend (RANGING)
+├─ ADX 20-25:      Transition zone
+├─ ADX > 25:       Strong directional move (TRENDING)
+└─ ADX > 40:       Very strong (late-stage exhaustion risk)
+
+CHOPPINESS (Fibonacci-based consolidation)
+├─ CHOP < 38.2:    Strongly trending (NOT choppy)
+├─ 38.2-61.8:      Transition / mixed
+└─ CHOP > 61.8:    Consolidating / choppy (PULLBACK safe)
+
+BOLLINGER BANDS
+├─ BB %B < 0.40:   Near lower band (cheap, good for pullback entries)
+├─ 0.40-0.60:      Middle band (neutral)
+└─ BB %B > 0.60:   Near upper band (extended, exhaustion risk)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+  POSITION MANAGEMENT
+═══════════════════════════════════════════════════════════════════════════════
+
+ENTRY:
+├─ Actual entry at OPEN of next 1H bar (after signal bar closes)
+├─ Risk: 2% of account per trade
+└─ Max allocation: 30% of account (SPOT mode)
+
+STOP LOSS:
+├─ Initial SL: Entry - (ATR × 1.5)
+├─ Floor: Min 3% below entry (SPOT mode safety)
+└─ Trail: Raised to break-even after +0.5R, then trail profits
+
+TAKE PROFIT:
+├─ TP1: Entry + (SL distance × 1.5R) → **close 100% here**
+├─ TP2: Entry + (SL distance × 3.0R) → rarely hit
+└─ Time exit: Any trade open > 48 hours → close at market
+
+RE-ENTRY COOLDOWN:
+└─ 12 hours minimum after any loss (same pair)
+
+
+═══════════════════════════════════════════════════════════════════════════════
+  TRADINGVIEW SETUP
+═══════════════════════════════════════════════════════════════════════════════
+
+1. ADD SCRIPT: regime_detector.pine
+   • Plots regime backgrounds (green=PULLBACK, blue=TRENDING, gray=RANGING)
+   • Shows EMA50/EMA200
+   • Shows ADX(14) and CHOP(14) indicators
+   • Displays entry signals
+   • Table summary (top-right)
+
+2. ADD OVERLAYS:
+   • EMA50 (orange, 2px)
+   • EMA200 (red, 2px)
+
+3. ADD LOWER PANEL:
+   • RSI(14) with zones:
+     ├─ 28 line (lower PULLBACK bound)
+     ├─ 55 line (upper PULLBACK bound)
+     ├─ 50 line (lower TRENDING bound)
+     └─ 75 line (upper TRENDING bound)
+
+4. SET TIMEFRAME TO 1H
+   • Signals are evaluated at 1H bar closes
+   • 4H and Daily data used for context (fetched automatically)
+
+5. CREATE ALERTS:
+   • Alert "PULLBACK detected" on green background
+   • Alert "TRENDING detected" on blue background
+   • Alert "Daily filter BLOCKED" on red zone
+
+
+═══════════════════════════════════════════════════════════════════════════════
+  BACKTESTED PROBABILITY (90-day BTC/ETH/SOL/BNB, Jan-Apr 2026)
+═══════════════════════════════════════════════════════════════════════════════
+
+PULLBACK Regime:
+├─ Occurrence: 4 trades in 90 days (during 6-day bull window)
+├─ Win Rate: 50% (2 wins, 2 losses)
+├─ Avg Winner: +0.56R
+├─ Avg Loser: -1.0R
+└─ Expectancy: -0.22R (negative in this period)
+
+TRENDING Regime:
+├─ Occurrence: 2 trades in 90 days (same 6-day window)
+├─ Win Rate: 0% (0 wins, 2 losses)
+├─ Avg Loss: -0.27R
+└─ Expectancy: -0.27R (needs ADX/CHOP guards improvement)
+
+Daily Filter Impact:
+├─ Blocks: 96.4% of potential entries (8,004 of 8,306 bars)
+├─ Reason: Mar 5-Apr 4 macro downtrend (BTC $91k→$67k)
+└─ Result: Saved entry into -1.6% drawdown
+
+⚠️ Strategy is CONSERVATIVE: Waits for clear bull conditions
+   Good for capital preservation, misses intra-day rallies
+
+
+═══════════════════════════════════════════════════════════════════════════════
+  END OF REGIME DEFINITIONS
+═══════════════════════════════════════════════════════════════════════════════
