@@ -69,12 +69,25 @@ float bb_pctb  = (close - bb_lower) / (bb_upper - bb_lower)
 float atr_val = ta.atr(atr_len)
 float atr_sma = ta.sma(atr_val, atr_sma_len)
 
-// ADX — Pine v6: ta.adx(length) returns [adx, plusDI, minusDI]
-[adx_val, _plus_di, _minus_di] = ta.adx(adx_len)
+// ADX — manual implementation (ta.adx removed in Pine v6)
+f_adx(length) =>
+    float up       = ta.change(high)
+    float down     = -ta.change(low)
+    float plus_dm  = na(up)   ? na : (up   > down and up   > 0.0 ? up   : 0.0)
+    float minus_dm = na(down) ? na : (down > up   and down > 0.0 ? down : 0.0)
+    float tr       = math.max(high - low, math.abs(high - close[1]), math.abs(low - close[1]))
+    float atr14    = ta.rma(tr, length)
+    float plus_di  = 100.0 * ta.rma(plus_dm, length) / math.max(atr14, 1e-10)
+    float minus_di = 100.0 * ta.rma(minus_dm, length) / math.max(atr14, 1e-10)
+    float dx       = 100.0 * math.abs(plus_di - minus_di) / math.max(plus_di + minus_di, 1e-10)
+    float adx      = ta.rma(dx, length)
+    adx
 
-// Choppiness Index (no built-in; manual calculation)
+float adx_val = f_adx(adx_len)
+
+// Choppiness Index — ta.sum() removed in Pine v6; use sma * length instead
 float chop_hl     = ta.highest(high, chop_len) - ta.lowest(low, chop_len)
-float chop_atrsum = ta.sum(ta.atr(1), chop_len)
+float chop_atrsum = ta.sma(ta.atr(1), chop_len) * chop_len
 float chop_val    = 100.0 * math.log10(chop_atrsum / math.max(chop_hl, 1e-10)) / math.log10(chop_len)
 
 // Daily EMAs — lookahead off to avoid future leak
