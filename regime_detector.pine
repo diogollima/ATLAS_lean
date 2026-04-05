@@ -1,8 +1,8 @@
-//@version=5
+//@version=6
 indicator("ATLAS Lean Regime Detector", overlay=true, max_bars_back=500)
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ATLAS Lean v2.0 — Regime Detector for TradingView
+// ATLAS Lean v2.0 — Regime Detector for TradingView (Pine Script v6)
 // Matches exact backtest logic (backtest.py detect_regime_bar)
 //
 // Green  bg = PULLBACK  (dip buy in uptrend)
@@ -12,123 +12,116 @@ indicator("ATLAS Lean Regime Detector", overlay=true, max_bars_back=500)
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 
-var g1 = "Moving Averages"
-ema50_len  = input.int(50,  "EMA50 Length",  group=g1)
-ema200_len = input.int(200, "EMA200 Length", group=g1)
+const string G_MA   = "Moving Averages"
+const string G_RSI  = "RSI"
+const string G_BB   = "Bollinger Bands"
+const string G_ATR  = "ATR"
+const string G_ADX  = "ADX & Choppiness"
+const string G_DAY  = "Daily Macro Filter"
+const string G_DISP = "Display"
 
-var g2 = "RSI"
-rsi_len          = input.int(14, "RSI Length",        group=g2)
-rsi_pb_min       = input.int(28, "Pullback RSI Min",  group=g2)
-rsi_pb_max       = input.int(55, "Pullback RSI Max",  group=g2)
-rsi_trend_min    = input.int(50, "Trending RSI Min",  group=g2)
-rsi_trend_max    = input.int(75, "Trending RSI Max",  group=g2)
+ema50_len      = input.int(50,    "EMA50 Length",                  group=G_MA)
+ema200_len     = input.int(200,   "EMA200 Length",                 group=G_MA)
 
-var g3 = "Bollinger Bands"
-bb_len   = input.int(20,   "BB Length",     group=g3)
-bb_mult  = input.float(2.0,"BB Multiplier", group=g3)
-bb_pb_thresh = input.float(0.40, "BB %B Threshold (Pullback < X)", group=g3)
+rsi_len        = input.int(14,    "RSI Length",                    group=G_RSI)
+rsi_pb_min     = input.int(28,    "Pullback RSI Min",              group=G_RSI)
+rsi_pb_max     = input.int(55,    "Pullback RSI Max",              group=G_RSI)
+rsi_trend_min  = input.int(50,    "Trending RSI Min",              group=G_RSI)
+rsi_trend_max  = input.int(75,    "Trending RSI Max",              group=G_RSI)
 
-var g4 = "ATR"
-atr_len     = input.int(14, "ATR Length",     group=g4)
-atr_sma_len = input.int(20, "ATR SMA Length", group=g4)
+bb_len         = input.int(20,    "BB Length",                     group=G_BB)
+bb_mult        = input.float(2.0, "BB Multiplier",                 group=G_BB)
+bb_pb_thresh   = input.float(0.40,"BB %B Threshold (Pullback < X)",group=G_BB)
 
-var g5 = "ADX & Choppiness"
-adx_len         = input.int(14,   "ADX Length",                    group=g5)
-adx_pb_max      = input.float(25.0, "ADX < X → Pullback valid",   group=g5)
-adx_trend_min   = input.float(25.0, "ADX > X → Trending valid",   group=g5)
-chop_len        = input.int(14,   "CHOP Length",                   group=g5)
-chop_pb_min     = input.float(55.0, "CHOP > X → Pullback valid",  group=g5)
-chop_trend_max  = input.float(38.2, "CHOP < X → Trending valid",  group=g5)
+atr_len        = input.int(14,    "ATR Length",                    group=G_ATR)
+atr_sma_len    = input.int(20,    "ATR SMA Length",                group=G_ATR)
 
-var g6 = "Daily Macro Filter"
-use_daily  = input.bool(true, "Enable Daily EMA Filter",  group=g6)
-d_ema21_len = input.int(21,  "Daily EMA21 Length",        group=g6)
-d_ema50_len = input.int(50,  "Daily EMA50 Length",        group=g6)
+adx_len        = input.int(14,    "ADX Length",                    group=G_ADX)
+adx_pb_max     = input.float(25.0,"ADX < X -> Pullback valid",     group=G_ADX)
+adx_trend_min  = input.float(25.0,"ADX > X -> Trending valid",     group=G_ADX)
+chop_len       = input.int(14,    "CHOP Length",                   group=G_ADX)
+chop_pb_min    = input.float(55.0,"CHOP > X -> Pullback valid",    group=G_ADX)
+chop_trend_max = input.float(38.2,"CHOP < X -> Trending valid",    group=G_ADX)
 
-var g7 = "Display"
-show_emas    = input.bool(true,  "Show EMA50 / EMA200",     group=g7)
-show_bgcolor = input.bool(true,  "Show Regime Background",  group=g7)
-show_signals = input.bool(true,  "Show Entry Signals",      group=g7)
-show_table   = input.bool(true,  "Show Summary Table",      group=g7)
+use_daily      = input.bool(true, "Enable Daily EMA Filter",       group=G_DAY)
+d_ema21_len    = input.int(21,    "Daily EMA21 Length",            group=G_DAY)
+d_ema50_len    = input.int(50,    "Daily EMA50 Length",            group=G_DAY)
+
+show_emas      = input.bool(true, "Show EMA50 / EMA200",           group=G_DISP)
+show_bgcolor   = input.bool(true, "Show Regime Background",        group=G_DISP)
+show_signals   = input.bool(true, "Show Entry Signals",            group=G_DISP)
+show_table     = input.bool(true, "Show Summary Table",            group=G_DISP)
 
 // ─── Indicators ───────────────────────────────────────────────────────────────
 
-ema50  = ta.ema(close, ema50_len)
-ema200 = ta.ema(close, ema200_len)
-rsi    = ta.rsi(close, rsi_len)
+float ema50  = ta.ema(close, ema50_len)
+float ema200 = ta.ema(close, ema200_len)
+float rsi    = ta.rsi(close, rsi_len)
 
 // Bollinger Bands %B
-bb_mid   = ta.sma(close, bb_len)
-bb_dev   = ta.stdev(close, bb_len)
-bb_upper = bb_mid + bb_mult * bb_dev
-bb_lower = bb_mid - bb_mult * bb_dev
-bb_pctb  = (close - bb_lower) / (bb_upper - bb_lower)
+float bb_mid   = ta.sma(close, bb_len)
+float bb_dev   = ta.stdev(close, bb_len)
+float bb_upper = bb_mid + bb_mult * bb_dev
+float bb_lower = bb_mid - bb_mult * bb_dev
+float bb_pctb  = (close - bb_lower) / (bb_upper - bb_lower)
 
 // ATR & its SMA
-atr_val = ta.atr(atr_len)
-atr_sma = ta.sma(atr_val, atr_sma_len)
+float atr_val = ta.atr(atr_len)
+float atr_sma = ta.sma(atr_val, atr_sma_len)
 
-// ADX — Pine v5 requires two args: DI length and ADX smoothing length
-adx_val = ta.adx(adx_len, adx_len)
+// ADX — Pine v6: ta.adx(length) returns [adx, plusDI, minusDI]
+[adx_val, _plus_di, _minus_di] = ta.adx(adx_len)
 
-// Choppiness Index (manual — no built-in in Pine v5)
-chop_hl    = ta.highest(high, chop_len) - ta.lowest(low, chop_len)
-chop_atrsum = ta.sum(ta.atr(1), chop_len)
-chop_val   = 100.0 * math.log10(chop_atrsum / math.max(chop_hl, 1e-10)) / math.log10(chop_len)
+// Choppiness Index (no built-in; manual calculation)
+float chop_hl     = ta.highest(high, chop_len) - ta.lowest(low, chop_len)
+float chop_atrsum = ta.sum(ta.atr(1), chop_len)
+float chop_val    = 100.0 * math.log10(chop_atrsum / math.max(chop_hl, 1e-10)) / math.log10(chop_len)
 
-// Daily EMAs (fetched from D timeframe)
-d_ema21 = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema21_len), lookahead=barmerge.lookahead_off)
-d_ema50 = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema50_len), lookahead=barmerge.lookahead_off)
-d_close = request.security(syminfo.tickerid, "D", close,                       lookahead=barmerge.lookahead_off)
+// Daily EMAs — lookahead off to avoid future leak
+float d_ema21 = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema21_len), lookahead=barmerge.lookahead_off)
+float d_ema50 = request.security(syminfo.tickerid, "D", ta.ema(close, d_ema50_len), lookahead=barmerge.lookahead_off)
+float d_close = request.security(syminfo.tickerid, "D", close,                       lookahead=barmerge.lookahead_off)
 
-macro_ok = d_close > d_ema21 and d_ema21 > d_ema50
+bool macro_ok = d_close > d_ema21 and d_ema21 > d_ema50
 
 // ─── Regime Logic ─────────────────────────────────────────────────────────────
 
-// PULLBACK conditions (all must be true):
-//   1H:  price > EMA200
-//   1H:  price within 2.5% of EMA50
-//   1H:  RSI 28–55
-//   1H:  BB %B < 0.40
-//   1H:  ADX < 25  (not in a strong directional move)
-//   1H:  CHOP > 55 (consolidating)
-//   4H context is approximated on this chart using the daily filter only
+// PULLBACK: dip buy in confirmed uptrend
+//   price > EMA200, within 2.5% of EMA50
+//   RSI 28-55, BB%B < 0.40
+//   ADX < 25 (not strongly directional), CHOP > 55 (consolidating)
 //   Daily: close > EMA21 > EMA50
 
-pullback_struct = close > ema200 and
-                 math.abs(close - ema50) / ema50 < 0.025 and
-                 rsi >= rsi_pb_min and rsi <= rsi_pb_max and
-                 bb_pctb < bb_pb_thresh and
-                 adx_val < adx_pb_max and
-                 chop_val > chop_pb_min
+bool pullback_struct = close > ema200
+                     and math.abs(close - ema50) / ema50 < 0.025
+                     and rsi >= rsi_pb_min and rsi <= rsi_pb_max
+                     and bb_pctb < bb_pb_thresh
+                     and adx_val < adx_pb_max
+                     and chop_val > chop_pb_min
 
-is_pullback = pullback_struct and (not use_daily or macro_ok)
+bool is_pullback = pullback_struct and (not use_daily or macro_ok)
 
-// TRENDING conditions (all must be true):
-//   1H:  price > EMA50 AND > EMA200
-//   1H:  RSI 50–75
-//   1H:  ATR >= ATR_SMA (expanding volatility)
-//   4H:  ADX > 25  (strong directional move)  → approximated at current TF
-//   4H:  CHOP < 38.2 (strongly trending)       → approximated at current TF
-//   Daily: close > EMA21 > EMA50
+// TRENDING: ride strong directional momentum
+//   price > EMA50 & EMA200, RSI 50-75
+//   ATR expanding, ADX > 25, CHOP < 38.2
 
-trending_struct = close > ema50 and
-                 close > ema200 and
-                 rsi >= rsi_trend_min and rsi <= rsi_trend_max and
-                 atr_val >= atr_sma and
-                 adx_val > adx_trend_min and
-                 chop_val < chop_trend_max
+bool trending_struct = close > ema50
+                      and close > ema200
+                      and rsi >= rsi_trend_min and rsi <= rsi_trend_max
+                      and atr_val >= atr_sma
+                      and adx_val > adx_trend_min
+                      and chop_val < chop_trend_max
 
-is_trending = trending_struct and (not use_daily or macro_ok)
+bool is_trending = trending_struct and (not use_daily or macro_ok)
 
-// RANGING = default
-is_ranging = not is_pullback and not is_trending
+// RANGING: default — no entry
+bool is_ranging = not is_pullback and not is_trending
 
-// ─── Background Color ─────────────────────────────────────────────────────────
+// ─── Background ───────────────────────────────────────────────────────────────
 
-bg_color = is_pullback ? color.new(color.green, 85) :
-           is_trending ? color.new(color.blue,  85) :
-           show_bgcolor ? color.new(color.gray, 93) : na
+color bg_color = is_pullback ? color.new(color.green, 85) :
+                 is_trending ? color.new(color.blue,  85) :
+                               color.new(color.gray,  93)
 
 bgcolor(show_bgcolor ? bg_color : na, title="Regime Background")
 
@@ -137,48 +130,62 @@ bgcolor(show_bgcolor ? bg_color : na, title="Regime Background")
 plot(show_emas ? ema50  : na, title="EMA50",  color=color.orange, linewidth=2)
 plot(show_emas ? ema200 : na, title="EMA200", color=color.red,    linewidth=2)
 
-// ─── Entry Signals (triangle on first bar of each new regime) ─────────────────
+// ─── Entry Signals ────────────────────────────────────────────────────────────
 
-pb_start    = is_pullback and not is_pullback[1]
-trend_start = is_trending and not is_trending[1]
+bool pb_start    = is_pullback and not is_pullback[1]
+bool trend_start = is_trending and not is_trending[1]
 
-plotshape(show_signals and pb_start,    title="PULLBACK Entry",  style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
-plotshape(show_signals and trend_start, title="TRENDING Entry",  style=shape.triangleup, location=location.belowbar, color=color.blue,  size=size.small)
+plotshape(show_signals and pb_start,    title="PULLBACK Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
+plotshape(show_signals and trend_start, title="TRENDING Entry", style=shape.triangleup, location=location.belowbar, color=color.blue,  size=size.small)
 
 // ─── Summary Table ────────────────────────────────────────────────────────────
 
 var table t = table.new(position.top_right, 2, 8,
-     bgcolor=color.new(color.black, 70),
-     border_color=color.new(color.gray, 50),
-     border_width=1, frame_color=color.gray, frame_width=1)
+     bgcolor       = color.new(color.black, 70),
+     border_color  = color.new(color.gray,  50),
+     border_width  = 1,
+     frame_color   = color.gray,
+     frame_width   = 1)
 
 if barstate.islast and show_table
-    regime_str  = is_pullback ? "PULLBACK"  : is_trending ? "TRENDING"  : "RANGING"
-    regime_col  = is_pullback ? color.green : is_trending ? color.blue  : color.gray
+    string regime_str = is_pullback ? "PULLBACK" : is_trending ? "TRENDING" : "RANGING"
+    color  regime_col = is_pullback ? color.green : is_trending ? color.blue : color.gray
 
-    // Header
-    table.cell(t, 0, 0, "ATLAS Regime",   bgcolor=color.new(color.black, 60), text_color=color.white, text_size=size.small)
-    table.cell(t, 1, 0, regime_str,        bgcolor=color.new(regime_col,   50), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 0, "ATLAS Regime", bgcolor=color.new(color.black, 60), text_color=color.white,  text_size=size.small)
+    table.cell(t, 1, 0, regime_str,      bgcolor=color.new(regime_col,  50), text_color=color.white,  text_size=size.small)
 
-    // Indicators
-    table.cell(t, 0, 1, "RSI(14)",         text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 1, str.tostring(rsi,       "#.1") + "  [28–55 / 50–75]", text_color=rsi >= 28 and rsi <= 75 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 1, "RSI(14)",      text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 1, str.tostring(rsi, "#.1") + "  [28-55 / 50-75]",
+         text_color = rsi >= 28 and rsi <= 75 ? color.green : color.red,
+         text_size  = size.small)
 
-    table.cell(t, 0, 2, "ADX(14)",         text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 2, str.tostring(adx_val,   "#.1") + "  [<25 or >25]",    text_color=adx_val > 20 ? color.green : color.orange, text_size=size.small)
+    table.cell(t, 0, 2, "ADX(14)",      text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(adx_val, "#.1") + "  [<25 or >25]",
+         text_color = adx_val > 20 ? color.green : color.orange,
+         text_size  = size.small)
 
-    table.cell(t, 0, 3, "CHOP(14)",        text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 3, str.tostring(chop_val,  "#.1") + "  [<38.2 or >55]",  text_color=chop_val < 61.8 ? color.green : color.orange, text_size=size.small)
+    table.cell(t, 0, 3, "CHOP(14)",     text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(chop_val, "#.1") + "  [<38.2 or >55]",
+         text_color = chop_val < 61.8 ? color.green : color.orange,
+         text_size  = size.small)
 
-    table.cell(t, 0, 4, "BB %B",           text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 4, str.tostring(bb_pctb,   "#.2") + "  [<0.40 pb]",      text_color=bb_pctb < 0.4 ? color.green : color.silver, text_size=size.small)
+    table.cell(t, 0, 4, "BB %B",        text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(bb_pctb, "#.2") + "  [<0.40 pb]",
+         text_color = bb_pctb < 0.4 ? color.green : color.silver,
+         text_size  = size.small)
 
-    table.cell(t, 0, 5, "ATR/SMA",         text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 5, str.tostring(atr_val/atr_sma, "#.2") + "x",           text_color=atr_val >= atr_sma ? color.green : color.silver, text_size=size.small)
+    table.cell(t, 0, 5, "ATR/SMA",      text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 5, str.tostring(atr_val / atr_sma, "#.2") + "x",
+         text_color = atr_val >= atr_sma ? color.green : color.silver,
+         text_size  = size.small)
 
-    table.cell(t, 0, 6, "Daily Filter",    text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 6, macro_ok ? "OK (bullish)" : "BLOCKED",                text_color=macro_ok ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6, "Daily Filter", text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 6, macro_ok ? "OK (bullish)" : "BLOCKED",
+         text_color = macro_ok ? color.green : color.red,
+         text_size  = size.small)
 
-    ema50_dist = (close - ema50) / ema50 * 100
-    table.cell(t, 0, 7, "Dist EMA50",      text_color=color.silver, text_size=size.small)
-    table.cell(t, 1, 7, str.tostring(ema50_dist, "#.2") + "%  [±2.5%]",       text_color=math.abs(ema50_dist) < 2.5 ? color.green : color.silver, text_size=size.small)
+    float ema50_dist = (close - ema50) / ema50 * 100.0
+    table.cell(t, 0, 7, "Dist EMA50",   text_color=color.silver, text_size=size.small)
+    table.cell(t, 1, 7, str.tostring(ema50_dist, "#.2") + "%  [+/-2.5%]",
+         text_color = math.abs(ema50_dist) < 2.5 ? color.green : color.silver,
+         text_size  = size.small)
