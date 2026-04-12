@@ -279,8 +279,21 @@ def score_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame,
     # 8. Order book — NOT AVAILABLE historically → always 0
     sigs["order_book"] = 0
 
-    # 9. Regime fit: LONG-only, require PULLBACK or TRENDING or BREAKOUT
-    sigs["regime_fit"] = int(regime in ("PULLBACK", "TRENDING", "BREAKOUT"))
+    # 9. Regime fit: LONG-only, require PULLBACK or TRENDING or BREAKOUT or RANGE_LONG
+    sigs["regime_fit"] = int(regime in ("PULLBACK", "TRENDING", "BREAKOUT", "RANGE_LONG"))
+
+    # ── Override scoring for RANGE_LONG (mean-reversion, not trend-following) ──
+    # Trend and momentum signals are mostly irrelevant / misleading in ranging markets.
+    # Replace with BB-specific, volume, and RSI signals tuned for range-bottom entries.
+    if regime == "RANGE_LONG":
+        sigs["trend_alignment"] = 0          # irrelevant — no macro trend required
+        sigs["ema_stack"]       = 0          # EMAs often unfavourable in ranges
+        sigs["rsi_mode"]        = int(not np.isnan(rsi_v) and rsi_v < 45)     # oversold in range
+        sigs["macd"]            = int(not np.isnan(macd_h) and macd_h > -abs(macd_h) * 0.5)  # not deeply negative
+        sigs["structure_level"] = int(not np.isnan(bb_b) and bb_b < 0.15)    # very near lower band
+        sigs["volume_ratio"]    = int(not np.isnan(vol_r) and vol_r > 0.8)    # any volume OK in range
+        sigs["taker_buy_bias"]  = int(not np.isnan(taker) and taker > 0.45)  # slight buy pressure
+        sigs["order_book"]      = 0          # not available historically
 
     score = sum(sigs.values())
     return score, sigs
@@ -362,6 +375,28 @@ def detect_regime_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame) -> str:
         return "PULLBACK"
     if is_trending:
         return "TRENDING"
+
+    # RANGE_LONG: mean-reversion buy at lower Bollinger Band in a confirmed range.
+    # Uses STRICT Fibonacci thresholds (ADX < 20, CHOP > 61.8) to ensure we are
+    # truly inside a colocated range — not a trending market with a dip.
+    #
+    # Does NOT require the daily macro filter (that would kill all ranging entries).
+    # Instead uses a weaker "not in freefall" guard (price > EMA200 × 0.85).
+    bb_lo_v  = row_1h.get("bb_lo",  np.nan)
+    bb_mid_v = row_1h.get("bb_mid", np.nan)
+
+    adx_range_strict  = not np.isnan(adx_v)  and adx_v  < 20    # Fibonacci lower
+    chop_range_strict = not np.isnan(chop_v) and chop_v > 61.8  # Fibonacci upper
+    near_lower_bb     = not np.isnan(bb_b)   and bb_b   < 0.20  # bottom 20% of band
+    rsi_range_buy     = not np.isnan(rsi_v)  and rsi_v  < 45    # not overbought in range
+    not_freefall      = np.isnan(ema200) or price > ema200 * 0.85  # catastrophic drop guard
+
+    is_range_long = (adx_range_strict and chop_range_strict and
+                     near_lower_bb and rsi_range_buy and not_freefall)
+
+    if is_range_long:
+        return "RANGE_LONG"
+
     return "RANGING"
 
 
@@ -436,9 +471,10 @@ async def run_backtest():
 
     # Adjusted thresholds (−1 because order book always = 0)
     thresholds = {
-        "PULLBACK": config.SCORE_THRESHOLD_PULLBACK - 1,   # 4
-        "TRENDING": config.SCORE_THRESHOLD_TRENDING - 1,   # 5
-        "BREAKOUT": config.SCORE_THRESHOLD_BREAKOUT - 1,   # 5
+        "PULLBACK":   config.SCORE_THRESHOLD_PULLBACK - 1,   # 4
+        "TRENDING":   config.SCORE_THRESHOLD_TRENDING - 1,   # 5
+        "BREAKOUT":   config.SCORE_THRESHOLD_BREAKOUT - 1,   # 5
+        "RANGE_LONG": 3,   # 3/7 scored signals (trend & ema_stack zeroed out)
     }
 
     # Fetch historical data
@@ -484,6 +520,7 @@ async def run_backtest():
         "total_bars_evaluated": 0,
         "failed_daily_filter": 0,
         "ranging_regime": 0,
+        "range_long_candidates": 0,
         "failed_score_threshold": 0,
         "valid_entries": 0,
     }
@@ -606,29 +643,34 @@ async def run_backtest():
 
             debug_stats["total_bars_evaluated"] += 1
 
-            # ── Daily trend filter: require 1D close > 1D EMA21 ──────────────
-            # Blocks entries during macro downtrends even when 1H/4H look OK
-            if pair in hist_1d:
-                df1d_sl = hist_1d[pair][hist_1d[pair].index <= ts].tail(60)
-                if len(df1d_sl) >= 21:
-                    last_1d = df1d_sl.iloc[-1]
-                    daily_ema21 = last_1d.get("ema20", np.nan)  # ema20≈ema21
-                    daily_ema50 = last_1d.get("ema50", np.nan)
-                    daily_close = last_1d["close"]
-                    # Skip if price is below daily EMA21 OR daily EMA21 < daily EMA50
-                    if (not np.isnan(daily_ema21) and daily_close < daily_ema21):
-                        debug_stats["failed_daily_filter"] += 1
-                        continue
-                    if (not np.isnan(daily_ema21) and not np.isnan(daily_ema50)
-                            and daily_ema21 < daily_ema50):
-                        debug_stats["failed_daily_filter"] += 1
-                        continue
-
-            # Detect regime
+            # ── Detect regime first so daily filter can be bypassed for RANGE_LONG ──
             regime = detect_regime_bar(row1, df4_sl)
+
+            # ── Daily trend filter ──────────────────────────────────────────────
+            # PULLBACK / TRENDING require confirmed macro uptrend (EMA21 > EMA50).
+            # RANGE_LONG skips this — its whole purpose is to profit in downtrend/
+            # consolidation periods. Uses its own "not in freefall" guard instead.
+            if regime in ("PULLBACK", "TRENDING", "BREAKOUT"):
+                if pair in hist_1d:
+                    df1d_sl = hist_1d[pair][hist_1d[pair].index <= ts].tail(60)
+                    if len(df1d_sl) >= 21:
+                        last_1d     = df1d_sl.iloc[-1]
+                        daily_ema21 = last_1d.get("ema20", np.nan)
+                        daily_ema50 = last_1d.get("ema50", np.nan)
+                        daily_close = last_1d["close"]
+                        if not np.isnan(daily_ema21) and daily_close < daily_ema21:
+                            debug_stats["failed_daily_filter"] += 1
+                            continue
+                        if (not np.isnan(daily_ema21) and not np.isnan(daily_ema50)
+                                and daily_ema21 < daily_ema50):
+                            debug_stats["failed_daily_filter"] += 1
+                            continue
+
             if regime == "RANGING":
                 debug_stats["ranging_regime"] += 1
                 continue
+            if regime == "RANGE_LONG":
+                debug_stats["range_long_candidates"] += 1
 
             # Score signals
             score, sigs = score_bar(row1, df4_sl, regime)
@@ -641,10 +683,16 @@ async def run_backtest():
             debug_stats["valid_entries"] += 1
 
             # Valid entry — size position
-            entry     = row1["close"]
-            atr_val   = row1["atr"]
-            raw_sl    = entry - atr_val * SL_ATR_MULT
-            sized     = size_spot(entry, raw_sl, atr_val, equity)
+            entry   = row1["close"]
+            atr_val = row1["atr"]
+
+            if regime == "RANGE_LONG":
+                # Tighter SL (1.0× ATR) — range trades are confined, don't need wide stops
+                raw_sl = entry - atr_val * 1.0
+            else:
+                raw_sl = entry - atr_val * SL_ATR_MULT  # 1.5× ATR for trend entries
+
+            sized = size_spot(entry, raw_sl, atr_val, equity)
 
             # Entry is at OPEN of next 1H bar
             next_bars = df1[df1.index > ts].head(1)
@@ -653,13 +701,21 @@ async def run_backtest():
             actual_entry = float(next_bars.iloc[0]["open"])
             entry_time   = next_bars.index[0]
 
-            # Recalculate SL/TP from actual entry
+            # Recalculate SL from actual entry
             risk_dist = actual_entry - sized["sl"] + (entry - actual_entry)
             if risk_dist <= 0:
                 risk_dist = actual_entry * SPOT_MIN_STOP
-            sl  = actual_entry - risk_dist
-            tp1 = actual_entry + risk_dist * TP1_R
-            tp2 = actual_entry + risk_dist * TP2_R
+            sl = actual_entry - risk_dist
+
+            if regime == "RANGE_LONG":
+                # TP targets: BB midline (mean reversion) and BB upper band
+                bb_mid_v = float(row1.get("bb_mid", np.nan))
+                bb_hi_v  = float(row1.get("bb_hi",  np.nan))
+                tp1 = bb_mid_v if not np.isnan(bb_mid_v) and bb_mid_v > actual_entry else actual_entry + risk_dist * TP1_R
+                tp2 = bb_hi_v  if not np.isnan(bb_hi_v)  and bb_hi_v  > tp1          else actual_entry + risk_dist * TP2_R
+            else:
+                tp1 = actual_entry + risk_dist * TP1_R
+                tp2 = actual_entry + risk_dist * TP2_R
 
             open_trades[pair] = {
                 "pair":       pair,
@@ -744,12 +800,13 @@ async def run_backtest():
     print("\n" + "="*65)
     print("  FILTER ANALYSIS")
     print("="*65)
-    print(f"  Total bars evaluated:      {debug_stats['total_bars_evaluated']:,}")
-    print(f"  ├─ Failed daily filter:    {debug_stats['failed_daily_filter']:,}")
-    print(f"  ├─ Detected as RANGING:    {debug_stats['ranging_regime']:,}")
-    print(f"  ├─ Failed score threshold: {debug_stats['failed_score_threshold']:,}")
-    print(f"  └─ Valid entry candidates: {debug_stats['valid_entries']}")
-    print(f"  Actual trades opened:      {n}")
+    print(f"  Total bars evaluated:         {debug_stats['total_bars_evaluated']:,}")
+    print(f"  ├─ Failed daily filter:       {debug_stats['failed_daily_filter']:,}  (PULLBACK/TRENDING only)")
+    print(f"  ├─ Detected as RANGING:       {debug_stats['ranging_regime']:,}  (no setup found)")
+    print(f"  ├─ RANGE_LONG candidates:     {debug_stats['range_long_candidates']:,}  (passed regime gate)")
+    print(f"  ├─ Failed score threshold:    {debug_stats['failed_score_threshold']:,}")
+    print(f"  └─ Valid entry candidates:    {debug_stats['valid_entries']}")
+    print(f"  Actual trades opened:         {n}")
 
     # ── Console output ────────────────────────────────────────────────────────
     print("\n" + "="*65)
