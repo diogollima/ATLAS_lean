@@ -47,10 +47,11 @@ use_daily      = input.bool(true, "Enable Daily EMA Filter",       group=G_DAY)
 d_ema21_len    = input.int(21,    "Daily EMA21 Length",            group=G_DAY)
 d_ema50_len    = input.int(50,    "Daily EMA50 Length",            group=G_DAY)
 
-show_emas      = input.bool(true, "Show EMA50 / EMA200",           group=G_DISP)
-show_bgcolor   = input.bool(true, "Show Regime Background",        group=G_DISP)
-show_signals   = input.bool(true, "Show Entry Signals",            group=G_DISP)
-show_table     = input.bool(true, "Show Summary Table",            group=G_DISP)
+show_emas      = input.bool(true,  "Show EMA50 / EMA200",          group=G_DISP)
+show_bb        = input.bool(true,  "Show Bollinger Bands",         group=G_DISP)
+show_bgcolor   = input.bool(true,  "Show Regime Background",       group=G_DISP)
+show_signals   = input.bool(true,  "Show Entry Signals",           group=G_DISP)
+show_table     = input.bool(true,  "Show Summary Table",           group=G_DISP)
 
 // ─── Indicators ───────────────────────────────────────────────────────────────
 
@@ -127,16 +128,45 @@ bool trending_struct = close > ema50
 
 bool is_trending = trending_struct and (not use_daily or macro_ok)
 
-// RANGING: default — no entry
-bool is_ranging = not is_pullback and not is_trending
+// RANGE_LONG: mean-reversion buy at lower BB in a confirmed colocated range
+// Strict Fibonacci thresholds (ADX < 20, CHOP > 61.8) — only fires in genuine ranges
+// No daily macro filter needed: "not in freefall" guard covers catastrophic drops
+bool adx_range_strict  = adx_val  < 20     // Fibonacci lower: weak trend
+bool chop_range_strict = chop_val > 61.8   // Fibonacci upper: strongly choppy
+bool near_lower_bb     = bb_pctb  < 0.20   // bottom 20% of Bollinger Band
+bool rsi_range_buy     = rsi < 45          // oversold in range context
+bool not_freefall      = close > ema200 * 0.85  // block only catastrophic crash
+
+bool is_range_long = adx_range_strict and chop_range_strict and
+                     near_lower_bb and rsi_range_buy and not_freefall
+
+// RANGING: default — no setup found
+bool is_ranging = not is_pullback and not is_trending and not is_range_long
 
 // ─── Background ───────────────────────────────────────────────────────────────
 
-color bg_color = is_pullback ? color.new(color.green, 85) :
-                 is_trending ? color.new(color.blue,  85) :
-                               color.new(color.gray,  93)
+color bg_color = is_pullback   ? color.new(color.green,  85) :
+                 is_trending   ? color.new(color.blue,   85) :
+                 is_range_long ? color.new(color.orange, 85) :
+                                 color.new(color.gray,   93)
 
 bgcolor(show_bgcolor ? bg_color : na, title="Regime Background")
+
+// ─── Bollinger Bands ──────────────────────────────────────────────────────────
+
+color bb_col = is_range_long ? color.new(color.orange, 30) : color.new(color.gray, 65)
+
+p_bb_upper = plot(show_bb ? bb_upper : na, title="BB Upper", color=bb_col, linewidth=1)
+             plot(show_bb ? bb_mid   : na, title="BB Mid",   color=color.new(color.gray, 55), linewidth=1, style=plot.style_circles)
+p_bb_lower = plot(show_bb ? bb_lower : na, title="BB Lower", color=bb_col, linewidth=1)
+fill(p_bb_upper, p_bb_lower,
+     color = is_range_long ? color.new(color.orange, 92) :
+             is_pullback   ? color.new(color.green,  95) :
+                             color.new(color.gray,   97),
+     title = "BB Fill")
+
+// TP target: BB midline shown as dashed line during RANGE_LONG (the mean-reversion target)
+plot(is_range_long ? bb_mid : na, title="Range TP (BB Mid)", color=color.new(color.orange, 0), linewidth=2, style=plot.style_linebr)
 
 // ─── MAs ──────────────────────────────────────────────────────────────────────
 
@@ -145,11 +175,13 @@ plot(show_emas ? ema200 : na, title="EMA200", color=color.red,    linewidth=2)
 
 // ─── Entry Signals ────────────────────────────────────────────────────────────
 
-bool pb_start    = is_pullback and not is_pullback[1]
-bool trend_start = is_trending and not is_trending[1]
+bool pb_start         = is_pullback   and not is_pullback[1]
+bool trend_start      = is_trending   and not is_trending[1]
+bool range_long_start = is_range_long and not is_range_long[1]
 
-plotshape(show_signals and pb_start,    title="PULLBACK Entry", style=shape.triangleup, location=location.belowbar, color=color.green, size=size.small)
-plotshape(show_signals and trend_start, title="TRENDING Entry", style=shape.triangleup, location=location.belowbar, color=color.blue,  size=size.small)
+plotshape(show_signals and pb_start,         title="PULLBACK Entry",   style=shape.triangleup, location=location.belowbar, color=color.green,  size=size.small)
+plotshape(show_signals and trend_start,      title="TRENDING Entry",   style=shape.triangleup, location=location.belowbar, color=color.blue,   size=size.small)
+plotshape(show_signals and range_long_start, title="RANGE_LONG Entry", style=shape.triangleup, location=location.belowbar, color=color.orange, size=size.small)
 
 // ─── Summary Table ────────────────────────────────────────────────────────────
 
@@ -161,8 +193,12 @@ var table t = table.new(position.top_right, 2, 8,
      frame_width   = 1)
 
 if barstate.islast and show_table
-    string regime_str = is_pullback ? "PULLBACK" : is_trending ? "TRENDING" : "RANGING"
-    color  regime_col = is_pullback ? color.green : is_trending ? color.blue : color.gray
+    string regime_str = is_pullback   ? "PULLBACK"   :
+                        is_trending   ? "TRENDING"   :
+                        is_range_long ? "RANGE_LONG" : "RANGING"
+    color  regime_col = is_pullback   ? color.green  :
+                        is_trending   ? color.blue   :
+                        is_range_long ? color.orange : color.gray
 
     table.cell(t, 0, 0, "ATLAS Regime", bgcolor=color.new(color.black, 60), text_color=color.white,  text_size=size.small)
     table.cell(t, 1, 0, regime_str,      bgcolor=color.new(regime_col,  50), text_color=color.white,  text_size=size.small)
