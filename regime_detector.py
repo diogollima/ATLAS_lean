@@ -36,7 +36,9 @@ def detect_regime(
     if df_1h is None or df_4h is None:
         return RegimeResult("RANGING", 0.0, {"reason": "missing critical timeframes"})
 
-    # Check TRENDING conditions first (needed by PULLBACK and as context)
+    # Check TRENDING conditions (used for PULLBACK macro context only — entries disabled)
+    # TRENDING disabled: 0% win rate across all backtests (peak-chasing at exhaustion tops).
+    # Still called so PULLBACK can use trending_pass as macro uptrend confirmation.
     trending_pass, trending_score, trending_details = _check_trending(df_1h, df_4h, volume_metrics)
 
     # Check BREAKOUT (highest priority specific regime)
@@ -51,9 +53,11 @@ def detect_regime(
     if pullback_pass:
         return RegimeResult("PULLBACK", pullback_score, pullback_details)
 
-    # Check TRENDING
-    if trending_pass:
-        return RegimeResult("TRENDING", trending_score, trending_details)
+    # TRENDING entries intentionally disabled — returns RANGING instead.
+    # Backtest shows 0% win rate: entries fire at momentum exhaustion tops.
+    # Re-enable only after identifying a structural fix (e.g. volume-confirmed breakout).
+    # if trending_pass:
+    #     return RegimeResult("TRENDING", trending_score, trending_details)
 
     # Default: RANGING
     ranging_score, ranging_details = _check_ranging(df_1h, df_4h)

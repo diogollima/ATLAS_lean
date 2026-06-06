@@ -126,7 +126,9 @@ bool trending_struct = close > ema50
                       and adx_val > adx_trend_min
                       and chop_val < chop_trend_max
 
-bool is_trending = trending_struct and (not use_daily or macro_ok)
+// TRENDING disabled — 0% win rate in backtest (peak-chasing at exhaustion tops)
+// Kept here for reference; is_trending is never used to trigger an entry signal
+bool is_trending = false  // trending_struct and (not use_daily or macro_ok)
 
 // RANGE_LONG: mean-reversion buy at lower BB in a confirmed colocated range
 // Strict Fibonacci thresholds (ADX < 20, CHOP > 61.8) — only fires in genuine ranges
