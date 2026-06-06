@@ -279,8 +279,8 @@ def score_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame,
     # 8. Order book — NOT AVAILABLE historically → always 0
     sigs["order_book"] = 0
 
-    # 9. Regime fit: LONG-only, require PULLBACK or TRENDING or BREAKOUT or RANGE_LONG
-    sigs["regime_fit"] = int(regime in ("PULLBACK", "TRENDING", "BREAKOUT", "RANGE_LONG"))
+    # 9. Regime fit: LONG-only, require PULLBACK or BREAKOUT or RANGE_LONG (TRENDING disabled)
+    sigs["regime_fit"] = int(regime in ("PULLBACK", "BREAKOUT", "RANGE_LONG"))
 
     # ── Override scoring for RANGE_LONG (mean-reversion, not trend-following) ──
     # Trend and momentum signals are mostly irrelevant / misleading in ranging markets.
@@ -358,23 +358,23 @@ def detect_regime_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame) -> str:
                    not np.isnan(rsi_v) and 28 <= rsi_v <= 55 and
                    not np.isnan(bb_b) and bb_b < 0.40)
 
-    # TRENDING: above both EMAs, RSI 50-75, ATR expanding +
-    #           ADX > 25 (confirmed directional move) + CHOP < 38.2 (not choppy)
-    # Re-enabled with proper regime guards (previously 14% win rate without them)
-    adx_4h_v  = df_4h_slice.iloc[-1].get("adx14", np.nan)  if len(df_4h_slice) >= 1 else np.nan
-    chop_4h_v = df_4h_slice.iloc[-1].get("chop14", np.nan) if len(df_4h_slice) >= 1 else np.nan
-    adx_trending  = not np.isnan(adx_4h_v)  and adx_4h_v  > 25
-    chop_trending = not np.isnan(chop_4h_v) and chop_4h_v < 38.2
-    is_trending = (not np.isnan(ema50) and price > ema50 and
-                   not np.isnan(ema200) and price > ema200 and
-                   not np.isnan(rsi_v) and 50 <= rsi_v <= 75 and
-                   not np.isnan(atr_v) and not np.isnan(atr_s) and atr_v >= atr_s and
-                   adx_trending and chop_trending)
+    # TRENDING: disabled — 0% win rate across all backtests.
+    # Entries fire at momentum exhaustion tops (late-trend peak-chasing).
+    # The is_trending calculation is kept here for reference / future re-enable,
+    # but the regime is never returned — falls through to RANGE_LONG / RANGING.
+    # adx_4h_v  = df_4h_slice.iloc[-1].get("adx14", np.nan)  if len(df_4h_slice) >= 1 else np.nan
+    # chop_4h_v = df_4h_slice.iloc[-1].get("chop14", np.nan) if len(df_4h_slice) >= 1 else np.nan
+    # adx_trending  = not np.isnan(adx_4h_v)  and adx_4h_v  > 25
+    # chop_trending = not np.isnan(chop_4h_v) and chop_4h_v < 38.2
+    # is_trending = (not np.isnan(ema50) and price > ema50 and
+    #                not np.isnan(ema200) and price > ema200 and
+    #                not np.isnan(rsi_v) and 50 <= rsi_v <= 75 and
+    #                not np.isnan(atr_v) and not np.isnan(atr_s) and atr_v >= atr_s and
+    #                adx_trending and chop_trending)
 
     if is_pullback:
         return "PULLBACK"
-    if is_trending:
-        return "TRENDING"
+    # if is_trending: return "TRENDING"  — disabled
 
     # RANGE_LONG: mean-reversion buy at lower Bollinger Band in a confirmed range.
     # Uses STRICT Fibonacci thresholds (ADX < 20, CHOP > 61.8) to ensure we are
@@ -472,9 +472,9 @@ async def run_backtest():
     # Adjusted thresholds (−1 because order book always = 0)
     thresholds = {
         "PULLBACK":   config.SCORE_THRESHOLD_PULLBACK - 1,   # 4
-        "TRENDING":   config.SCORE_THRESHOLD_TRENDING - 1,   # 5
         "BREAKOUT":   config.SCORE_THRESHOLD_BREAKOUT - 1,   # 5
         "RANGE_LONG": 3,   # 3/7 scored signals (trend & ema_stack zeroed out)
+        # TRENDING disabled (0% win rate) — not in thresholds so it can never fire
     }
 
     # Fetch historical data
