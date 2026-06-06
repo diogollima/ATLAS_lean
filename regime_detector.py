@@ -124,7 +124,7 @@ def _check_trending(
     if not (adx_ok and chop_ok):
         # Market is not genuinely trending — skip remaining checks
         return False, 0.0, {
-            "reason": f"ADX/CHOP regime gate failed: ADX={adx_4h:.1f if adx_4h else 'N/A'} (need >25), CHOP={chop_4h:.1f if chop_4h else 'N/A'} (need <38.2)",
+            "reason": f"ADX/CHOP regime gate failed: ADX={f'{adx_4h:.1f}' if adx_4h else 'N/A'} (need >25), CHOP={f'{chop_4h:.1f}' if chop_4h else 'N/A'} (need <38.2)",
             **conditions,
         }
 
@@ -222,7 +222,7 @@ def _check_pullback(
     conditions["chop14_1h"] = round(chop_1h, 1) if chop_1h else None
     if not (adx_ranging and chop_ranging):
         return False, 0.0, {
-            "reason": f"ADX/CHOP gate failed: ADX={adx_1h:.1f if adx_1h else 'N/A'} (need <25), CHOP={chop_1h:.1f if chop_1h else 'N/A'} (need >55)",
+            "reason": f"ADX/CHOP gate failed: ADX={f'{adx_1h:.1f}' if adx_1h else 'N/A'} (need <25), CHOP={f'{chop_1h:.1f}' if chop_1h else 'N/A'} (need >55)",
             **conditions,
         }
 
