@@ -16,7 +16,7 @@ import db
 from scanner import BinanceScanner
 from indicators import compute_indicators, compute_volume_metrics, summarize_indicators
 from regime_detector import detect_regime
-from signals import score_pair
+from signals import score_pair, passes_daily_trend_filter
 from claude_client import ClaudeClient, ClaudeDecision
 from paper_trader import PaperTrader, TradeSetup
 from position_manager import PositionManager
@@ -160,6 +160,24 @@ class AtlasLean:
                             pair,
                         )
                         would_call_claude = False
+
+                    # Entry filters — identical to the ones the backtest applies.
+                    # Without these the live scanner was running a looser
+                    # strategy than the one the backtest measured.
+                    if would_call_claude:
+                        daily_ok, daily_reason = passes_daily_trend_filter(klines)
+                        if not daily_ok:
+                            logger.info("%s blocked by daily trend filter: %s", pair, daily_reason)
+                            would_call_claude = False
+
+                    if would_call_claude and config.REENTRY_COOLDOWN_HOURS > 0:
+                        since_loss = db.hours_since_last_loss(pair)
+                        if since_loss is not None and since_loss < config.REENTRY_COOLDOWN_HOURS:
+                            logger.info(
+                                "%s in re-entry cooldown: %.1fh since last loss (need %dh)",
+                                pair, since_loss, config.REENTRY_COOLDOWN_HOURS,
+                            )
+                            would_call_claude = False
 
                     # Step 5: Call Claude (live mode) or send analysis (dry-run)
                     if would_call_claude:

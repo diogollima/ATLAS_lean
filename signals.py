@@ -31,10 +31,17 @@ def score_pair(
     klines: dict[str, pd.DataFrame],
     volume_metrics: dict,
     regime: str,
+    direction: str = "LONG",
 ) -> SignalResult:
     """
     Score a pair on the 9-signal model.
     Returns SignalResult with score 0-9 and individual signal states.
+
+    `direction` makes the long-only assumption explicit. The regime detector
+    and signals 1-5 are inherently bullish, and the position sizer only sizes
+    longs, so LONG is the only value the automated path produces today. The
+    two order-flow signals (7, 8) read it so they never reward flow pushing
+    against the trade.
     """
     signals = {}
     details = {}
@@ -69,13 +76,13 @@ def score_pair(
     signals["volume_ratio"] = s6
     details["volume_ratio"] = d6
 
-    # Signal 7: Taker buy bias
-    s7, d7 = _sig_taker_buy_bias(volume_metrics, regime)
+    # Signal 7: Taker buy bias (directional)
+    s7, d7 = _sig_taker_buy_bias(volume_metrics, regime, direction)
     signals["taker_buy_bias"] = s7
     details["taker_buy_bias"] = d7
 
-    # Signal 8: Order book imbalance
-    s8, d8 = _sig_orderbook_imbalance(volume_metrics, regime)
+    # Signal 8: Order book imbalance (directional)
+    s8, d8 = _sig_orderbook_imbalance(volume_metrics, regime, direction)
     signals["order_book"] = s8
     details["order_book"] = d8
 
@@ -93,6 +100,43 @@ def score_pair(
         signals=signals,
         details=details,
     )
+
+
+# ---------------------------------------------------------------------------
+# Entry Filters (shared by the live scanner and the backtest)
+# ---------------------------------------------------------------------------
+
+def passes_daily_trend_filter(
+    klines: dict[str, pd.DataFrame],
+) -> tuple[bool, str]:
+    """
+    Macro gate: block entries while the daily trend is down, even when the
+    1H/4H picture looks constructive.
+
+    Requires 1D close above 1D EMA21, and 1D EMA21 above 1D EMA50.
+    Fails OPEN (returns True) when daily data is missing, so a data gap can
+    never silently block every entry.
+    """
+    if not config.DAILY_TREND_FILTER:
+        return True, "daily trend filter disabled"
+
+    df_1d = klines.get("1d")
+    if df_1d is None or len(df_1d) < 21:
+        return True, "insufficient daily data — filter skipped"
+
+    close = _latest(df_1d, "close")
+    ema21 = _latest(df_1d, "ema21")
+    ema50 = _latest(df_1d, "ema50")
+
+    if close is None or ema21 is None:
+        return True, "daily EMAs unavailable — filter skipped"
+
+    if close < ema21:
+        return False, f"daily close {close:.2f} below EMA21 {ema21:.2f}"
+    if ema50 is not None and ema21 < ema50:
+        return False, f"daily EMA21 {ema21:.2f} below EMA50 {ema50:.2f}"
+
+    return True, "daily trend up"
 
 
 # ---------------------------------------------------------------------------
@@ -319,11 +363,18 @@ def _sig_volume_ratio(klines: dict, volume_metrics: dict, regime: str) -> tuple[
     return False, f"volume {pct}% of avg (below {label} threshold)"
 
 
-def _sig_taker_buy_bias(volume_metrics: dict, regime: str) -> tuple[bool, str]:
+def _sig_taker_buy_bias(
+    volume_metrics: dict, regime: str, direction: str = "LONG"
+) -> tuple[bool, str]:
     """
-    Signal 7: Taker buy bias
-    Standard: taker buy ratio > 0.55 (long) or < 0.45 (short)
-    Breakout: > 0.60 (long) or < 0.40 (short)
+    Signal 7: Taker buy bias — DIRECTIONAL.
+
+    Scores only flow that favours the trade direction:
+      LONG  : taker buy ratio > 0.55 (0.60 on BREAKOUT)
+      SHORT : taker buy ratio < 0.45 (0.40 on BREAKOUT)
+
+    Previously this returned True for aggression in EITHER direction, so a
+    market being heavily sold scored +1 on a long-only system.
     """
     tbr = volume_metrics.get("taker_buy_ratio_1h", 0.5)
 
@@ -334,18 +385,28 @@ def _sig_taker_buy_bias(volume_metrics: dict, regime: str) -> tuple[bool, str]:
         long_thresh = config.TAKER_BIAS_LONG
         short_thresh = config.TAKER_BIAS_SHORT
 
-    if tbr > long_thresh:
-        return True, f"taker buy {tbr:.3f} > {long_thresh} (bullish)"
+    if direction == "LONG":
+        if tbr > long_thresh:
+            return True, f"taker buy {tbr:.3f} > {long_thresh} (buyers aggressive)"
+        return False, f"taker buy {tbr:.3f} <= {long_thresh} (no buy-side edge)"
+
     if tbr < short_thresh:
-        return True, f"taker buy {tbr:.3f} < {short_thresh} (bearish)"
-    return False, f"taker buy {tbr:.3f} — neutral"
+        return True, f"taker buy {tbr:.3f} < {short_thresh} (sellers aggressive)"
+    return False, f"taker buy {tbr:.3f} >= {short_thresh} (no sell-side edge)"
 
 
-def _sig_orderbook_imbalance(volume_metrics: dict, regime: str) -> tuple[bool, str]:
+def _sig_orderbook_imbalance(
+    volume_metrics: dict, regime: str, direction: str = "LONG"
+) -> tuple[bool, str]:
     """
-    Signal 8: Order book imbalance
-    Standard: bid/ask imbalance > 58/42 in trade direction
-    Breakout: > 60/40
+    Signal 8: Order book imbalance — DIRECTIONAL.
+
+    Scores only imbalance that favours the trade direction:
+      LONG  : bids >= 58% (60% on BREAKOUT)
+      SHORT : asks >= 58% (60% on BREAKOUT)
+
+    Previously this returned True for an imbalance in EITHER direction, so a
+    book stacked 25/75 against a long still scored +1.
     """
     ob_bid = volume_metrics.get("ob_bid_pct", 0.5)
 
@@ -357,12 +418,14 @@ def _sig_orderbook_imbalance(volume_metrics: dict, regime: str) -> tuple[bool, s
     bid_pct = int(ob_bid * 100)
     ask_pct = 100 - bid_pct
 
-    # Check for either direction
-    if ob_bid >= threshold:
-        return True, f"bids {bid_pct}%/asks {ask_pct}% — buy pressure"
+    if direction == "LONG":
+        if ob_bid >= threshold:
+            return True, f"bids {bid_pct}%/asks {ask_pct}% — buy pressure"
+        return False, f"bids {bid_pct}%/asks {ask_pct}% — no buy-side imbalance"
+
     if (1 - ob_bid) >= threshold:
         return True, f"bids {bid_pct}%/asks {ask_pct}% — sell pressure"
-    return False, f"bids {bid_pct}%/asks {ask_pct}% — balanced"
+    return False, f"bids {bid_pct}%/asks {ask_pct}% — no sell-side imbalance"
 
 
 def _sig_regime_fit(regime: str) -> tuple[bool, str]:

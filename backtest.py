@@ -1,17 +1,26 @@
 """
-ATLAS Lean v2.0 — 7-Day Walk-Forward Backtest
-Fetches historical klines for all 6 pairs, replays every 1H candle
-as if it were "now", runs the full signal pipeline, and simulates
-all qualifying entries forward to SL/TP resolution.
+ATLAS Lean v2.0 — Walk-Forward Backtest
+
+Replays every 1H candle as if it were "now" and simulates all qualifying
+entries forward to SL/TP resolution.
+
+THE ENGINE IS SHARED WITH LIVE. Indicators, regime detection, signal scoring
+and entry filters are imported from indicators.py / regime_detector.py /
+signals.py — the same modules main.py runs. This file contributes only the
+historical data feed, the fill simulator and the reporting.
 
 Assumptions:
 - Entry at OPEN of the candle following the signal candle
 - SL and TP calculated from ATR at signal time (× 1.5 stop, 1.5R/3.0R targets)
 - Max 3 simultaneous trades, 1 per pair at a time
-- Long-only; pair skipped if price < EMA200 × 0.97
-- Taker buy ratio and order book: proxied from volume data (noted as limitation)
+- Long-only (direction="LONG" is passed explicitly to the scorer)
 - Risk: 2% of account per trade (SPOT mode: capped at 30% allocation)
 - Account: $1,000 USDT
+
+Known divergence from live (one, unavoidable):
+- Binance serves no historical order-book depth, so signal 8 always scores 0
+  and the max score is 8/9. Regime thresholds are reduced by 1 to compensate.
+  Live, with real depth, can reach 9/9.
 
 Output:
 - Per-trade table with entry/SL/TP/outcome/PnL
@@ -33,6 +42,14 @@ import numpy as np
 import pandas as pd
 
 import config
+# The backtest runs the SAME code as the live scanner. Indicators, regime
+# detection, signal scoring and entry filters are all imported — not
+# reimplemented — so a backtest number describes the strategy that actually
+# trades. (Previously this file carried its own copies with different EMA
+# periods, RSI bands and structure rules.)
+from indicators import compute_indicators, compute_volume_metrics
+from regime_detector import detect_regime
+from signals import score_pair, passes_daily_trend_filter
 
 # ── Settings ─────────────────────────────────────────────────────────────────
 ACCOUNT_USDT   = 1000.0
@@ -107,256 +124,22 @@ async def fetch_hist(pair: str, interval: str, days: int,
     data = all_data
     if not data:
         return pd.DataFrame()
+    # Column names match scanner.fetch_klines() exactly so the frames can be
+    # handed straight to indicators.compute_indicators().
     df = pd.DataFrame(data, columns=[
-        "open_time","open","high","low","close","volume",
-        "close_time","qav","trades","tbv","tbqv","ignore"
+        "open_time", "open", "high", "low", "close", "volume",
+        "close_time", "quote_volume", "trades",
+        "taker_buy_volume", "taker_buy_quote_volume", "ignore",
     ])
-    for col in ["open","high","low","close","volume","tbv","qav"]:
+    for col in ["open", "high", "low", "close", "volume",
+                "quote_volume", "taker_buy_volume", "taker_buy_quote_volume"]:
         df[col] = df[col].astype(float)
+    df["trades"] = df["trades"].astype(int)
     df["open_time"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    df["close_time"] = pd.to_datetime(df["close_time"], unit="ms", utc=True)
+    df.drop(columns=["ignore"], inplace=True)
     df.set_index("open_time", inplace=True)
     return df
-
-
-# ── Indicator computation (standalone, no pandas-ta import issues) ────────────
-def ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, adjust=False).mean()
-
-def rsi(s: pd.Series, n: int = 14) -> pd.Series:
-    d = s.diff()
-    gain = d.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
-    loss = (-d.clip(upper=0)).ewm(alpha=1/n, adjust=False).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
-
-def atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - df["close"].shift()).abs(),
-        (df["low"]  - df["close"].shift()).abs(),
-    ], axis=1).max(axis=1)
-    return tr.ewm(alpha=1/n, adjust=False).mean()
-
-def macd_hist(s: pd.Series) -> pd.Series:
-    m = ema(s, 12) - ema(s, 26)
-    sig = ema(m, 9)
-    return m - sig
-
-def bollinger(s: pd.Series, n: int = 20) -> tuple[pd.Series, pd.Series, pd.Series]:
-    mid  = s.rolling(n).mean()
-    std  = s.rolling(n).std()
-    return mid - 2*std, mid, mid + 2*std
-
-def adx(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    """Average Directional Index. < 20 = ranging; > 25 = strong trend."""
-    up   = df["high"].diff()
-    down = -df["low"].diff()
-    plus_dm  = up.where((up > down) & (up > 0), 0.0)
-    minus_dm = down.where((down > up) & (down > 0), 0.0)
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - df["close"].shift()).abs(),
-        (df["low"]  - df["close"].shift()).abs(),
-    ], axis=1).max(axis=1)
-    atr_w    = tr.ewm(alpha=1/n, adjust=False).mean()
-    plus_di  = 100 * plus_dm.ewm(alpha=1/n, adjust=False).mean() / atr_w.replace(0, np.nan)
-    minus_di = 100 * minus_dm.ewm(alpha=1/n, adjust=False).mean() / atr_w.replace(0, np.nan)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-    return dx.ewm(alpha=1/n, adjust=False).mean()
-
-def choppiness(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    """Choppiness Index. > 61.8 = consolidating; < 38.2 = trending strongly."""
-    tr = pd.concat([
-        df["high"] - df["low"],
-        (df["high"] - df["close"].shift()).abs(),
-        (df["low"]  - df["close"].shift()).abs(),
-    ], axis=1).max(axis=1)
-    atr_sum = tr.rolling(n).sum()
-    range_n = df["high"].rolling(n).max() - df["low"].rolling(n).min()
-    return 100 * np.log10(atr_sum / range_n.replace(0, np.nan)) / np.log10(n)
-
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    c = df["close"]
-    df["ema20"]  = ema(c, 20)
-    df["ema50"]  = ema(c, 50)
-    df["ema100"] = ema(c, 100)
-    df["ema200"] = ema(c, 200)
-    df["rsi"]    = rsi(c, 14)
-    df["atr"]    = atr(df, 14)
-    df["atr_sma"]= df["atr"].rolling(20).mean()
-    df["macd_h"] = macd_hist(c)
-    bb_lo, bb_mid, bb_hi = bollinger(c, 20)
-    df["bb_lo"]  = bb_lo
-    df["bb_mid"] = bb_mid
-    df["bb_hi"]  = bb_hi
-    df["bb_pctb"]= (c - bb_lo) / (bb_hi - bb_lo + 1e-9)
-    df["vol_sma"]= df["volume"].rolling(20).mean()
-    df["vol_ratio"] = df["volume"] / df["vol_sma"].replace(0, np.nan)
-    # Taker buy proxy: tbv / volume (historical aggTrades unavailable)
-    df["taker_proxy"] = df["tbv"] / df["volume"].replace(0, np.nan)
-    # Regime detection
-    df["adx14"]  = adx(df, 14)
-    df["chop14"] = choppiness(df, 14)
-    return df
-
-
-# ── Signal scoring at a given bar ─────────────────────────────────────────────
-def score_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame,
-              regime: str) -> tuple[int, dict]:
-    """
-    Score 9 signals for a single 1H bar. Returns (score, details_dict).
-    Signal 8 (order book) not available historically → forced 0.
-    Signal 7 (taker buy) uses tbv proxy.
-    """
-    sigs = {}
-
-    price  = row_1h["close"]
-    ema20  = row_1h["ema20"]
-    ema50  = row_1h["ema50"]
-    ema100 = row_1h["ema100"]
-    ema200 = row_1h["ema200"]
-    rsi_v  = row_1h["rsi"]
-    macd_h = row_1h["macd_h"]
-    vol_r  = row_1h["vol_ratio"]
-    bb_b   = row_1h["bb_pctb"]
-    taker  = row_1h["taker_proxy"]
-
-    # 4H reference
-    if len(df_4h_slice) >= 2:
-        r4 = df_4h_slice.iloc[-1]
-        p4_ema50  = r4.get("ema50", np.nan)
-        p4_ema200 = r4.get("ema200", np.nan)
-        p4_close  = r4["close"]
-        struct_4h = _structure(df_4h_slice)
-    else:
-        p4_ema50 = p4_ema200 = p4_close = np.nan
-        struct_4h = "mixed"
-
-    # 1. Trend alignment: 4H price above 4H EMA50 AND EMA200 (spec-correct timeframe)
-    # Original used 1H EMA20>EMA50 which fires on every tiny bounce — too noisy.
-    sigs["trend_alignment"] = int(
-        not np.isnan(p4_ema50) and not np.isnan(p4_ema200) and
-        p4_close > p4_ema50 and p4_close > p4_ema200
-    )
-
-    # 2. EMA stack: EMA20 > EMA50 > EMA100
-    sigs["ema_stack"] = int(
-        not any(np.isnan(x) for x in [ema20, ema50, ema100]) and
-        ema20 > ema50 > ema100
-    )
-
-    # 3. RSI in regime-appropriate zone
-    if regime == "PULLBACK":
-        sigs["rsi_mode"] = int(not np.isnan(rsi_v) and 30 <= rsi_v <= 55)
-    elif regime == "TRENDING":
-        sigs["rsi_mode"] = int(not np.isnan(rsi_v) and 50 <= rsi_v <= 75)
-    elif regime == "BREAKOUT":
-        sigs["rsi_mode"] = int(not np.isnan(rsi_v) and rsi_v >= 55)
-    else:
-        sigs["rsi_mode"] = 0
-
-    # 4. MACD histogram positive (bullish momentum)
-    sigs["macd"] = int(not np.isnan(macd_h) and macd_h > 0)
-
-    # 5. Structure: uptrend structure on 4H
-    sigs["structure_level"] = int(struct_4h == "uptrend")
-
-    # 6. Volume ratio >= threshold
-    vol_thr = config.VOLUME_RATIO_BREAKOUT if regime == "BREAKOUT" else config.VOLUME_RATIO_THRESHOLD
-    sigs["volume_ratio"] = int(not np.isnan(vol_r) and vol_r >= vol_thr)
-
-    # 7. Taker buy proxy >= threshold (tbv/volume)
-    thr = config.TAKER_BIAS_BREAKOUT_LONG if regime == "BREAKOUT" else config.TAKER_BIAS_LONG
-    sigs["taker_buy_bias"] = int(not np.isnan(taker) and taker >= thr)
-
-    # 8. Order book — NOT AVAILABLE historically → always 0
-    sigs["order_book"] = 0
-
-    # 9. Regime fit: LONG-only, require PULLBACK or TRENDING or BREAKOUT
-    sigs["regime_fit"] = int(regime in ("PULLBACK", "TRENDING", "BREAKOUT"))
-
-    score = sum(sigs.values())
-    return score, sigs
-
-
-def _structure(df: pd.DataFrame) -> str:
-    if len(df) < 10:
-        return "mixed"
-    highs = df["high"].values[-10:]
-    lows  = df["low"].values[-10:]
-    swH, swL = [], []
-    for i in range(2, len(highs)-2):
-        if highs[i] > highs[i-1] and highs[i] > highs[i+1]: swH.append(highs[i])
-        if lows[i]  < lows[i-1]  and lows[i]  < lows[i+1]:  swL.append(lows[i])
-    if len(swH) >= 2 and len(swL) >= 2:
-        if swH[-1] > swH[-2] and swL[-1] > swL[-2]: return "uptrend"
-        if swH[-1] < swH[-2] and swL[-1] < swL[-2]: return "downtrend"
-    return "mixed"
-
-
-# ── Regime detection (simplified for backtesting) ─────────────────────────────
-def detect_regime_bar(row_1h: pd.Series, df_4h_slice: pd.DataFrame) -> str:
-    price  = row_1h["close"]
-    ema50  = row_1h["ema50"]
-    ema200 = row_1h["ema200"]
-    rsi_v  = row_1h["rsi"]
-    bb_b   = row_1h["bb_pctb"]
-    vol_r  = row_1h["vol_ratio"]
-    atr_v  = row_1h["atr"]
-    atr_s  = row_1h["atr_sma"]
-
-    # LONG-only: must be above EMA200
-    if not np.isnan(ema200) and price < ema200 * 0.97:
-        return "RANGING"  # skip — downtrend
-
-    # 4H context
-    if len(df_4h_slice) >= 1:
-        r4      = df_4h_slice.iloc[-1]
-        p4_e50  = r4.get("ema50", np.nan)
-        p4_e200 = r4.get("ema200", np.nan)
-        p4_c    = r4["close"]
-        above4  = (not np.isnan(p4_e50) and p4_c > p4_e50)
-    else:
-        above4 = False
-
-    adx_v  = row_1h["adx14"]
-    chop_v = row_1h["chop14"]
-
-    # PULLBACK: macro uptrend + price near EMA50 + RSI in pullback zone +
-    #           ADX < 20 (not in free-fall) + CHOP > 61.8 (consolidating)
-    near_ema50 = (not np.isnan(ema50) and
-                  abs(price - ema50) / ema50 < 0.025)
-    macro_up_4h = (len(df_4h_slice) >= 1 and
-                   not np.isnan(df_4h_slice.iloc[-1].get("ema50", np.nan)) and
-                   not np.isnan(df_4h_slice.iloc[-1].get("ema200", np.nan)) and
-                   df_4h_slice.iloc[-1]["ema50"] > df_4h_slice.iloc[-1]["ema200"])
-    # ADX < 25 (not in a strong directional move — price slowing down, not free-falling)
-    # CHOP > 55 (some consolidation; strict 61.8 blocks pullbacks in transition phases)
-    adx_ranging  = not np.isnan(adx_v)  and adx_v  < 25
-    chop_ranging = not np.isnan(chop_v) and chop_v > 55
-    is_pullback = (above4 and near_ema50 and macro_up_4h and adx_ranging and chop_ranging and
-                   not np.isnan(rsi_v) and 28 <= rsi_v <= 55 and
-                   not np.isnan(bb_b) and bb_b < 0.40)
-
-    # TRENDING: above both EMAs, RSI 50-75, ATR expanding +
-    #           ADX > 25 (confirmed directional move) + CHOP < 38.2 (not choppy)
-    # Re-enabled with proper regime guards (previously 14% win rate without them)
-    adx_4h_v  = df_4h_slice.iloc[-1].get("adx14", np.nan)  if len(df_4h_slice) >= 1 else np.nan
-    chop_4h_v = df_4h_slice.iloc[-1].get("chop14", np.nan) if len(df_4h_slice) >= 1 else np.nan
-    adx_trending  = not np.isnan(adx_4h_v)  and adx_4h_v  > 25
-    chop_trending = not np.isnan(chop_4h_v) and chop_4h_v < 38.2
-    is_trending = (not np.isnan(ema50) and price > ema50 and
-                   not np.isnan(ema200) and price > ema200 and
-                   not np.isnan(rsi_v) and 50 <= rsi_v <= 75 and
-                   not np.isnan(atr_v) and not np.isnan(atr_s) and atr_v >= atr_s and
-                   adx_trending and chop_trending)
-
-    if is_pullback:
-        return "PULLBACK"
-    if is_trending:
-        return "TRENDING"
-    return "RANGING"
 
 
 # ── Trade simulation ───────────────────────────────────────────────────────────
@@ -424,15 +207,20 @@ async def run_backtest():
     print(f"  Period:  last {LOOKBACK_DAYS} days, evaluated at each 1H close")
     print(f"  Account: ${ACCOUNT_USDT:,.0f}  |  Risk: {RISK_PCT*100:.0f}%/trade  |  Max trades: {MAX_TRADES}")
     print(f"  Mode:    SPOT (30% allocation cap, 3% min stop)")
-    print(f"  Note:    Order book signal disabled (historical data unavailable)")
+    print(f"  Engine:  shared with live — indicators.py / regime_detector.py / signals.py")
+    print(f"  Filters: daily trend={config.DAILY_TREND_FILTER}, "
+          f"re-entry cooldown={config.REENTRY_COOLDOWN_HOURS}h")
+    print(f"  Note:    Order book signal always 0 (depth not available historically)")
     print(f"           Max score = 8/9; thresholds reduced by 1 for each regime")
     print()
 
-    # Adjusted thresholds (−1 because order book always = 0)
+    # The ONLY deliberate divergence from live: Binance serves no historical
+    # order-book depth, so signal 8 can never score. Thresholds drop by 1 to
+    # keep the bar equivalent. Every other rule is the live code, unmodified.
     thresholds = {
-        "PULLBACK": config.SCORE_THRESHOLD_PULLBACK - 1,   # 4
-        "TRENDING": config.SCORE_THRESHOLD_TRENDING - 1,   # 5
-        "BREAKOUT": config.SCORE_THRESHOLD_BREAKOUT - 1,   # 5
+        "PULLBACK": config.SCORE_THRESHOLD_PULLBACK - 1,
+        "TRENDING": config.SCORE_THRESHOLD_TRENDING - 1,
+        "BREAKOUT": config.SCORE_THRESHOLD_BREAKOUT - 1,
     }
 
     # Fetch historical data
@@ -448,10 +236,16 @@ async def run_backtest():
         if h1.empty or h4.empty:
             print("FAILED — skipped")
             continue
-        hist_1h[pair]  = add_indicators(h1)
-        hist_4h[pair]  = add_indicators(h4)
-        hist_15m[pair] = h15
-        hist_1d[pair]  = add_indicators(h1d)
+        # Indicators are computed ONCE over the full history using the live
+        # engine. Every indicator here is causal (EMA / RSI / ATR / rolling
+        # windows look only backwards), so computing on the full series and
+        # then slicing to `ts` is identical to computing on the slice — no
+        # lookahead is introduced.
+        ind = compute_indicators({"1h": h1, "4h": h4, "1d": h1d})
+        hist_1h[pair]  = ind.get("1h", h1)
+        hist_4h[pair]  = ind.get("4h", h4)
+        hist_1d[pair]  = ind.get("1d", h1d)
+        hist_15m[pair] = h15   # raw — used only for intrabar SL/TP fills
         print(f"OK ({len(h1)} 1H bars, {len(h4)} 4H bars, {len(h15)} 15m bars, {len(h1d)} 1D bars)")
 
     # Walk-forward loop
@@ -570,10 +364,12 @@ async def run_backtest():
             if pair not in hist_1h or pair not in hist_4h:
                 continue
 
-            # Re-entry cooldown: skip if last loss was < 12h ago
-            if pair in last_loss_time:
+            # Re-entry cooldown after a loss (config.REENTRY_COOLDOWN_HOURS).
+            # Live reads the same window from the trades table via
+            # db.hours_since_last_loss().
+            if config.REENTRY_COOLDOWN_HOURS > 0 and pair in last_loss_time:
                 hours_since_loss = (ts - last_loss_time[pair]).total_seconds() / 3600
-                if hours_since_loss < 12:
+                if hours_since_loss < config.REENTRY_COOLDOWN_HOURS:
                     continue
 
             df1 = hist_1h[pair]
@@ -582,44 +378,52 @@ async def run_backtest():
             # Get row at this timestamp
             if ts not in df1.index:
                 continue
-            row1 = df1.loc[ts]
 
-            # Get 4H slice up to this timestamp
+            # Build the same klines dict the live scanner passes around,
+            # truncated to everything known at `ts` (no lookahead).
             df4_sl = df4[df4.index <= ts].tail(50)
             if len(df4_sl) < 5:
                 continue
-
-            # ── Daily trend filter: require 1D close > 1D EMA21 ──────────────
-            # Blocks entries during macro downtrends even when 1H/4H look OK
+            klines = {
+                "1h": df1.loc[:ts],
+                "4h": df4_sl,
+            }
             if pair in hist_1d:
-                df1d_sl = hist_1d[pair][hist_1d[pair].index <= ts].tail(60)
-                if len(df1d_sl) >= 21:
-                    last_1d = df1d_sl.iloc[-1]
-                    daily_ema21 = last_1d.get("ema20", np.nan)  # ema20≈ema21
-                    daily_ema50 = last_1d.get("ema50", np.nan)
-                    daily_close = last_1d["close"]
-                    # Skip if price is below daily EMA21 OR daily EMA21 < daily EMA50
-                    if (not np.isnan(daily_ema21) and daily_close < daily_ema21):
-                        continue
-                    if (not np.isnan(daily_ema21) and not np.isnan(daily_ema50)
-                            and daily_ema21 < daily_ema50):
-                        continue
+                klines["1d"] = hist_1d[pair][hist_1d[pair].index <= ts].tail(60)
 
-            # Detect regime
-            regime = detect_regime_bar(row1, df4_sl)
+            # Volume metrics via the live helper. depth / book_ticker /
+            # agg_trades / ticker24h are None because Binance serves no
+            # historical snapshots — compute_volume_metrics then returns the
+            # neutral defaults (ob_bid_pct = 0.5), so signal 8 scores 0.
+            vol_metrics = compute_volume_metrics(
+                klines["1h"], klines["4h"], None, None, None, None,
+            )
+
+            # Daily trend filter — shared implementation
+            daily_ok, _ = passes_daily_trend_filter(klines)
+            if not daily_ok:
+                continue
+
+            # Regime detection — live implementation
+            regime = detect_regime(klines, vol_metrics).regime
             if regime == "RANGING":
                 continue
 
-            # Score signals
-            score, sigs = score_bar(row1, df4_sl, regime)
-            threshold   = thresholds.get(regime, 999)
+            # Signal scoring — live implementation
+            sig_result = score_pair(pair, klines, vol_metrics, regime, direction="LONG")
+            score     = sig_result.score
+            sigs      = {k: int(v) for k, v in sig_result.signals.items()}
+            threshold = thresholds.get(regime, 999)
 
             if score < threshold:
                 continue
 
             # Valid entry — size position
-            entry     = row1["close"]
-            atr_val   = row1["atr"]
+            row1      = df1.loc[ts]
+            entry     = float(row1["close"])
+            atr_val   = float(row1["atr14"])
+            if not np.isfinite(atr_val) or atr_val <= 0:
+                continue
             raw_sl    = entry - atr_val * SL_ATR_MULT
             sized     = size_spot(entry, raw_sl, atr_val, equity)
 

@@ -63,6 +63,16 @@ SCORE_THRESHOLD_PULLBACK: int = 5         # Min score to trigger Claude in PULLB
 SCORE_THRESHOLD_BREAKOUT: int = 6         # Min score to trigger Claude in BREAKOUT
 MIN_SCORE_LOG: int = 3                    # Min score to log signal to DB
 
+# ---------------------------------------------------------------------------
+# Entry Filters
+# Applied IDENTICALLY by the live scanner (main.py) and the backtest
+# (backtest.py). These previously existed only in the backtest, which meant
+# backtested results were produced by a stricter strategy than the one running
+# live. Set either to a falsy value to disable.
+# ---------------------------------------------------------------------------
+DAILY_TREND_FILTER: bool = True     # Require 1D close > 1D EMA21 and EMA21 > EMA50
+REENTRY_COOLDOWN_HOURS: int = 12    # Block re-entry on a pair for N hours after a loss
+
 VOLUME_RATIO_THRESHOLD: float = 1.3       # 130% of 20-period avg for standard regimes
 VOLUME_RATIO_BREAKOUT: float = 1.5        # 150% for breakout regime
 

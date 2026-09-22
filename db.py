@@ -295,6 +295,35 @@ def get_closed_trades(since: Optional[datetime] = None, limit: int = 50) -> list
     ).fetchall()
 
 
+def hours_since_last_loss(pair: str) -> Optional[float]:
+    """
+    Hours since the most recent LOSING trade closed on this pair.
+    Returns None if the pair has never closed a loss (no cooldown applies).
+    Backs the re-entry cooldown that the backtest has always applied.
+    """
+    conn = get_conn()
+    row = conn.execute(
+        """SELECT closed_at FROM trades
+           WHERE pair = ? AND status != 'OPEN'
+             AND pnl_r IS NOT NULL AND pnl_r < 0
+             AND closed_at IS NOT NULL
+           ORDER BY closed_at DESC LIMIT 1""",
+        (pair,),
+    ).fetchone()
+
+    if not row or not row["closed_at"]:
+        return None
+
+    try:
+        closed = datetime.fromisoformat(str(row["closed_at"]).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if closed.tzinfo is None:
+        closed = closed.replace(tzinfo=timezone.utc)
+
+    return (datetime.now(timezone.utc) - closed).total_seconds() / 3600
+
+
 def get_open_trade_for_pair(pair: str) -> Optional[sqlite3.Row]:
     """Return the open trade for a given pair, if any."""
     conn = get_conn()
