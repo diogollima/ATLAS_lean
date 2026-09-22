@@ -115,12 +115,17 @@ def _check_trending(
     chop_4h = _latest(df_4h, "chop14")
     adx_ok  = adx_4h is not None and adx_4h > 25
     chop_ok = chop_4h is not None and chop_4h < 38.2
-    conditions["adx14_4h"] = round(adx_4h, 1) if adx_4h else None
-    conditions["chop14_4h"] = round(chop_4h, 1) if chop_4h else None
+    conditions["adx14_4h"] = round(adx_4h, 1) if adx_4h is not None else None
+    conditions["chop14_4h"] = round(chop_4h, 1) if chop_4h is not None else None
     if not (adx_ok and chop_ok):
         # Market is not genuinely trending — skip remaining checks
+        adx_s = f"{adx_4h:.1f}" if adx_4h is not None else "N/A"
+        chop_s = f"{chop_4h:.1f}" if chop_4h is not None else "N/A"
         return False, 0.0, {
-            "reason": f"ADX/CHOP regime gate failed: ADX={adx_4h:.1f if adx_4h else 'N/A'} (need >25), CHOP={chop_4h:.1f if chop_4h else 'N/A'} (need <38.2)",
+            "reason": (
+                f"ADX/CHOP regime gate failed: ADX={adx_s} (need >25), "
+                f"CHOP={chop_s} (need <38.2)"
+            ),
             **conditions,
         }
 
@@ -214,11 +219,16 @@ def _check_pullback(
     # CHOP > 55: some consolidation (strict 61.8 blocks pullbacks in transition phases)
     adx_ranging  = adx_1h is not None and adx_1h < 25
     chop_ranging = chop_1h is not None and chop_1h > 55
-    conditions["adx14_1h"] = round(adx_1h, 1) if adx_1h else None
-    conditions["chop14_1h"] = round(chop_1h, 1) if chop_1h else None
+    conditions["adx14_1h"] = round(adx_1h, 1) if adx_1h is not None else None
+    conditions["chop14_1h"] = round(chop_1h, 1) if chop_1h is not None else None
     if not (adx_ranging and chop_ranging):
+        adx_s = f"{adx_1h:.1f}" if adx_1h is not None else "N/A"
+        chop_s = f"{chop_1h:.1f}" if chop_1h is not None else "N/A"
         return False, 0.0, {
-            "reason": f"ADX/CHOP gate failed: ADX={adx_1h:.1f if adx_1h else 'N/A'} (need <25), CHOP={chop_1h:.1f if chop_1h else 'N/A'} (need >55)",
+            "reason": (
+                f"ADX/CHOP gate failed: ADX={adx_s} (need <25), "
+                f"CHOP={chop_s} (need >55)"
+            ),
             **conditions,
         }
 

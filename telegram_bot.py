@@ -33,9 +33,18 @@ class TelegramBot:
         self._app = None
 
     def _auth(self, update: Update) -> bool:
-        """Check if message is from authorized chat."""
+        """
+        Check if message is from the authorized chat.
+        Fails CLOSED: an unconfigured TELEGRAM_CHAT_ID rejects every command,
+        so an unconfigured bot can never be driven by an arbitrary Telegram user.
+        """
         if config.TELEGRAM_CHAT_ID == 0:
-            return True  # Not configured — allow all (dev mode)
+            logger.warning(
+                "TELEGRAM_CHAT_ID not configured — rejecting command from chat %s. "
+                "Set TELEGRAM_CHAT_ID in .env to enable commands.",
+                getattr(update.effective_chat, "id", "unknown"),
+            )
+            return False
         return update.effective_chat.id == config.TELEGRAM_CHAT_ID
 
     async def start(self) -> None:
@@ -369,9 +378,9 @@ class TelegramBot:
         if self.atlas:
             try:
                 data = await self.atlas.scanner.scan_all()
-                pd = data.get(pair, {}).get("ticker24h", {})
-                if pd and "lastPrice" in pd:
-                    exit_price = float(pd["lastPrice"])
+                ticker = data.get(pair, {}).get("ticker24h") or {}
+                if "last_price" in ticker:
+                    exit_price = float(ticker["last_price"])
             except Exception:
                 pass
 
@@ -406,9 +415,9 @@ class TelegramBot:
         if self.atlas:
             try:
                 data = await self.atlas.scanner.scan_all()
-                pd = data.get(pair, {}).get("ticker24h", {})
-                if pd and "lastPrice" in pd:
-                    current_price = float(pd["lastPrice"])
+                ticker = data.get(pair, {}).get("ticker24h") or {}
+                if "last_price" in ticker:
+                    current_price = float(ticker["last_price"])
             except Exception:
                 pass
 

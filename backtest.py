@@ -34,12 +34,6 @@ import pandas as pd
 
 import config
 
-# ── CLI args ──────────────────────────────────────────────────────────────────
-_parser = argparse.ArgumentParser(description="ATLAS Lean Walk-Forward Backtest")
-_parser.add_argument("--days", type=int, default=7,
-                     help="Number of days to backtest (default: 7)")
-_args = _parser.parse_args()
-
 # ── Settings ─────────────────────────────────────────────────────────────────
 ACCOUNT_USDT   = 1000.0
 RISK_PCT       = 0.02          # 2% per trade
@@ -49,7 +43,7 @@ TP2_R          = 3.0
 MAX_TRADES     = 3
 SPOT_ALLOC_PCT = 0.30          # max 30% of account per trade (SPOT)
 SPOT_MIN_STOP  = 0.03          # min 3% stop distance (SPOT floor)
-LOOKBACK_DAYS  = _args.days
+LOOKBACK_DAYS  = 7             # default; overridden by --days when run as a script
 EVAL_INTERVAL  = "1h"          # evaluate at each 1H candle close
 FWD_CANDLES    = 96            # 96 × 15m = 24h forward simulation per trade
 
@@ -805,5 +799,15 @@ async def run_backtest():
     return all_results, equity_curve
 
 
+def _parse_args():
+    """Parse CLI args. Called only from __main__ so importing this module
+    never touches sys.argv (which broke any caller with its own arguments)."""
+    parser = argparse.ArgumentParser(description="ATLAS Lean Walk-Forward Backtest")
+    parser.add_argument("--days", type=int, default=7,
+                        help="Number of days to backtest (default: 7)")
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
+    LOOKBACK_DAYS = _parse_args().days
     asyncio.run(run_backtest())

@@ -96,8 +96,9 @@ SCAN_INTERVAL_SECONDS: int = 300         # 5-minute scan cycle
 # ---------------------------------------------------------------------------
 # Claude Models
 # ---------------------------------------------------------------------------
-HAIKU_MODEL: str = "claude-haiku-4-5-20251001"
-SONNET_MODEL: str = "claude-sonnet-4-6-20250514"
+# Model IDs are complete as-is — never append a date suffix.
+HAIKU_MODEL: str = "claude-haiku-4-5"    # Per-signal entry evaluation (cheap, fast)
+SONNET_MODEL: str = "claude-sonnet-5"    # Weekly strategy review (deeper reasoning)
 
 # ---------------------------------------------------------------------------
 # Database

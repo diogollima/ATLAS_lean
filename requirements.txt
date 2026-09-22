@@ -1,6 +1,8 @@
 pandas>=2.1.0
 pandas-ta>=0.3.14b
-numpy>=1.24.0
+# pandas-ta 0.3.14b imports numpy.NaN, which was removed in numpy 2.0.
+# Must stay below 2.x until pandas-ta ships a numpy-2 compatible release.
+numpy>=1.24.0,<2
 anthropic>=0.40.0
 python-telegram-bot>=21.0
 httpx>=0.27.0

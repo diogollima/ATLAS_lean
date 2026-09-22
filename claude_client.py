@@ -39,7 +39,10 @@ class ClaudeClient:
     """Manages Claude API calls with prompt caching for cost optimization."""
 
     def __init__(self) -> None:
-        self._client = anthropic.Anthropic(api_key=config.ANTHROPIC_API_KEY)
+        # AsyncAnthropic — evaluate_entry() and weekly_review() are coroutines
+        # running on the same event loop as the Telegram bot and the scan loop.
+        # A sync client would block that loop for the whole API call.
+        self._client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self._strategy_text = self._load_strategy()
         self._total_input_tokens = 0
         self._total_output_tokens = 0
@@ -189,7 +192,7 @@ class ClaudeClient:
         )
 
         try:
-            response = self._client.messages.create(
+            response = await self._client.messages.create(
                 model=config.HAIKU_MODEL,
                 max_tokens=500,
                 system=self._build_system_prompt(),
@@ -313,7 +316,7 @@ class ClaudeClient:
         )
 
         try:
-            response = self._client.messages.create(
+            response = await self._client.messages.create(
                 model=config.SONNET_MODEL,
                 max_tokens=2000,
                 messages=[{"role": "user", "content": prompt}],
