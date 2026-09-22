@@ -523,17 +523,62 @@ class TestEquityCompounds(unittest.TestCase):
             "not freeze config.PAPER_BALANCE at import time",
         )
 
-    def test_depleted_account_is_rejected(self):
-        from paper_trader import PaperTrader, TradeSetup
-        self._closed_trade(-100.0)
-        self.assertEqual(self.trader.current_equity(1000.0), 0.0)
-        setup = TradeSetup(
-            pair="BTCUSDT", direction="LONG", entry_price=100.0,
-            stop_initial=97.0, tp1=104.0, tp2=109.0,
-            position_size_pct=1.0, atr_at_entry=1.0,
+    def _setup(self):
+        from paper_trader import TradeSetup
+        return TradeSetup(
+            pair="BTCUSDT", direction="LONG", entry_price=60000.0,
+            stop_initial=58200.0, tp1=62700.0, tp2=65400.0,
+            position_size_pct=1.0, atr_at_entry=500.0,
         )
-        with self.assertRaises(ValueError):
-            self.trader.open_trade(setup)
+
+    def test_open_trade_sizes_against_live_equity(self):
+        """
+        Behavioural, not signature-level: a correct default that the body
+        ignores is still the original bug. Capture what the sizer is actually
+        handed.
+        """
+        import paper_trader
+        captured = {}
+        real_sizer = paper_trader.size_position
+
+        def spy(entry, sl, atr, account_usdt, mode=None):
+            captured["account_usdt"] = account_usdt
+            return real_sizer(entry=entry, sl=sl, atr=atr,
+                              account_usdt=account_usdt, mode=mode)
+
+        paper_trader.size_position = spy
+        try:
+            self._closed_trade(50.0)                 # equity 1000 -> 1500
+            self.trader.open_trade(self._setup())
+        finally:
+            paper_trader.size_position = real_sizer
+
+        self.assertAlmostEqual(
+            captured["account_usdt"], config.PAPER_BALANCE * 1.5, places=6,
+            msg="position sizing used the starting balance, not live equity",
+        )
+
+    def test_depleted_account_is_rejected_before_sizing(self):
+        """
+        Must fail on the equity check specifically. Falling through to the
+        sizer also raises ValueError, so asserting the type alone would pass
+        against the bug.
+        """
+        import paper_trader
+        self._closed_trade(-100.0)
+        self.assertEqual(self.trader.current_equity(), 0.0)
+
+        called = []
+        real_sizer = paper_trader.size_position
+        paper_trader.size_position = lambda **kw: called.append(kw)
+        try:
+            with self.assertRaises(ValueError) as ctx:
+                self.trader.open_trade(self._setup())
+        finally:
+            paper_trader.size_position = real_sizer
+
+        self.assertIn("depleted", str(ctx.exception).lower())
+        self.assertEqual(called, [], "sizer was reached with a dead account")
 
 
 class TestSchemaMigration(unittest.TestCase):
@@ -608,6 +653,23 @@ class TestSinglePriceFetch(unittest.TestCase):
 
     def test_endpoint_is_the_lightweight_one(self):
         self.assertTrue(config.EP_TICKER_PRICE.endswith("/ticker/price"))
+
+    def test_fetch_price_actually_calls_that_endpoint(self):
+        """
+        Asserting the constant's value says nothing about which constant
+        fetch_price() uses — check the call site, not the config.
+        """
+        tree = _source_tree("scanner.py")
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    node.name == "fetch_price":
+                referenced = {
+                    n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)
+                }
+                self.assertIn("EP_TICKER_PRICE", referenced)
+                self.assertNotIn("EP_TICKER24H", referenced)
+                return
+        self.fail("scanner.fetch_price() not found")
 
     def test_close_commands_no_longer_call_scan_all(self):
         tree = _source_tree("telegram_bot.py")
