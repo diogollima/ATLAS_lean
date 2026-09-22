@@ -102,18 +102,54 @@ class PaperTrader:
 
         return True, "Valid"
 
+    def current_equity(self, starting_balance: Optional[float] = None) -> float:
+        """
+        Account equity compounded forward from realized results.
+
+        Position sizing used to be anchored to config.PAPER_BALANCE forever,
+        so "risk 2% of account" silently meant "risk 2% of the balance you
+        started with" — drifting further from reality with every close.
+
+        Each stored pnl_pct is a percentage of the equity at the time that
+        trade closed, so they compound multiplicatively, not additively.
+        """
+        if starting_balance is None:
+            starting_balance = config.PAPER_BALANCE
+
+        equity = starting_balance
+        for pnl_pct in db.get_realized_pnl_pct_series():
+            equity *= (1.0 + pnl_pct / 100.0)
+            if equity <= 0:
+                return 0.0
+        return equity
+
     def has_manual_trades(self) -> bool:
         """Return True if any open trade was entered manually by the user."""
         trades = db.get_open_trades()
         return any(t["source"] == "MANUAL" for t in trades)
 
-    def open_trade(self, setup: TradeSetup, account_usdt: float = config.PAPER_BALANCE) -> tuple[int, str]:
+    def open_trade(
+        self, setup: TradeSetup, account_usdt: Optional[float] = None
+    ) -> tuple[int, str]:
         """
         Validate, size, and open a paper trade.
         Calls position_sizer to compute qty / actual risk for the active mode.
         Returns (trade_id, message).
         Raises ValueError if validation fails.
+
+        `account_usdt` defaults to the CURRENT compounded equity. It was
+        previously a fixed config.PAPER_BALANCE bound at import time, so every
+        trade was sized against the starting balance no matter what the account
+        had done since.
         """
+        if account_usdt is None:
+            account_usdt = self.current_equity()
+
+        if account_usdt <= 0:
+            raise ValueError(
+                f"Account equity depleted (${account_usdt:.2f}) — no new trades"
+            )
+
         # 1. Run position sizer — this may widen the stop in SPOT mode
         try:
             ps = size_position(
@@ -201,8 +237,24 @@ class PaperTrader:
         else:
             pnl_absolute = entry - exit_price
 
-        pnl_r = pnl_absolute / risk if risk > 0 else 0
-        pnl_pct = (pnl_absolute / entry) * trade["position_size_pct"] if entry > 0 else 0
+        pnl_r_leg = pnl_absolute / risk if risk > 0 else 0
+
+        # If TP1 already sold half, that half is banked at the price it sold
+        # at; only the remaining 50% rides to this exit.
+        banked_r = trade["realized_pnl_r"] or 0.0
+        if trade["half_closed"]:
+            pnl_r = banked_r + 0.5 * pnl_r_leg
+        else:
+            pnl_r = pnl_r_leg
+
+        # PnL as a percentage of the account.
+        #   R-multiple x the account percentage risked on the trade.
+        # This previously divided by `entry` instead of the risk distance,
+        # understating every result by (risk_distance / entry) — about 33x at
+        # the 3% SPOT stop floor. get_daily_pnl() sums this column and
+        # check_daily_halt() compares it to DAILY_DRAWDOWN_HALT_PCT, so the
+        # halt needed ~148 consecutive full losses instead of ~4.
+        pnl_pct = pnl_r * trade["position_size_pct"]
 
         # Map reason to status
         status_map = {
@@ -254,8 +306,6 @@ class PaperTrader:
         if trade["half_closed"]:
             raise ValueError(f"Trade #{trade_id} already half-closed")
 
-        db.update_trade(trade_id, half_closed=1)
-
         entry = trade["entry_price"]
         risk = abs(entry - trade["stop_initial"])
         if trade["direction"] == "LONG":
@@ -264,8 +314,18 @@ class PaperTrader:
             pnl = entry - current_price
         pnl_r = pnl / risk if risk > 0 else 0
 
+        # Bank the half that just sold. Without this the gain locked in at TP1
+        # was discarded: a TP1 exit followed by a breakeven stop recorded ~0R
+        # instead of the half-position profit actually taken.
+        db.update_trade(
+            trade_id,
+            half_closed=1,
+            realized_pnl_r=round(0.5 * pnl_r, 6),
+        )
+
         logger.info(
-            "Trade #%d half-closed at %.2f (%.2fR)", trade_id, current_price, pnl_r
+            "Trade #%d half-closed at %.2f (%.2fR on the half — %.3fR banked)",
+            trade_id, current_price, pnl_r, 0.5 * pnl_r,
         )
 
         return {

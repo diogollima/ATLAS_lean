@@ -41,6 +41,7 @@ KLINE_LIMITS: dict[str, int] = {
 BINANCE_BASE: str = "https://api.binance.com"
 EP_KLINES: str = "/api/v3/klines"
 EP_TICKER24H: str = "/api/v3/ticker/24hr"
+EP_TICKER_PRICE: str = "/api/v3/ticker/price"   # weight 1 — single last price
 EP_DEPTH: str = "/api/v3/depth"
 EP_BOOK_TICKER: str = "/api/v3/ticker/bookTicker"
 EP_AGG_TRADES: str = "/api/v3/aggTrades"

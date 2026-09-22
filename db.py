@@ -65,6 +65,7 @@ def init_db() -> None:
             position_size_pct REAL NOT NULL,
             peak_price        REAL,
             half_closed       INTEGER DEFAULT 0,
+            realized_pnl_r    REAL DEFAULT 0,
             status            TEXT NOT NULL DEFAULT 'OPEN',
             close_price       REAL,
             pnl_r             REAL,
@@ -125,7 +126,24 @@ def init_db() -> None:
             ON position_history(trade_id, recorded_at);
     """)
     conn.commit()
+    _run_migrations(conn)
     logger.info("Database initialized: %s", config.DB_PATH)
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """
+    Apply additive schema changes to databases created before a column existed.
+    CREATE TABLE IF NOT EXISTS does nothing to an existing table, so new
+    columns have to be added explicitly. Safe to run on every startup.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(trades)")}
+
+    if "realized_pnl_r" not in existing:
+        # Profit banked by a partial (TP1) exit, in R. Added when close_half()
+        # started recording the half it sold instead of discarding it.
+        conn.execute("ALTER TABLE trades ADD COLUMN realized_pnl_r REAL DEFAULT 0")
+        conn.commit()
+        logger.info("Migration: added trades.realized_pnl_r")
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +311,22 @@ def get_closed_trades(since: Optional[datetime] = None, limit: int = 50) -> list
         "SELECT * FROM trades WHERE status != 'OPEN' ORDER BY closed_at DESC LIMIT ?",
         (limit,),
     ).fetchall()
+
+
+def get_realized_pnl_pct_series() -> list[float]:
+    """
+    Every closed trade's realized PnL (% of account at the time it closed),
+    oldest first. Used to compound the account forward from its starting
+    balance — each entry is a percentage of the equity that preceded it, so
+    they multiply rather than add.
+    """
+    conn = get_conn()
+    rows = conn.execute(
+        """SELECT pnl_pct FROM trades
+           WHERE status != 'OPEN' AND pnl_pct IS NOT NULL
+           ORDER BY closed_at ASC, id ASC"""
+    ).fetchall()
+    return [float(r["pnl_pct"]) for r in rows]
 
 
 def hours_since_last_loss(pair: str) -> Optional[float]:

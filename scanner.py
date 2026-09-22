@@ -88,6 +88,27 @@ class BinanceScanner:
             logger.warning("fetch_ticker_24h(%s) failed: %s", pair, e)
             return None
 
+    async def fetch_price(self, pair: str) -> Optional[float]:
+        """
+        Fetch just the last traded price for one pair (weight 1).
+
+        Use this when a single price is all that is needed. scan_all() pulls
+        5 kline timeframes plus depth, book ticker, aggTrades and 24h stats
+        for every watchlist pair — roughly 100x the work and rate-limit
+        weight — which is what /close and /closehalf used to do to read one
+        number.
+        """
+        try:
+            resp = await self._client.get(
+                config.EP_TICKER_PRICE,
+                params={"symbol": pair},
+            )
+            resp.raise_for_status()
+            return float(resp.json()["price"])
+        except Exception as e:
+            logger.warning("fetch_price(%s) failed: %s", pair, e)
+            return None
+
     async def fetch_depth(self, pair: str, limit: int = 20) -> Optional[dict]:
         """Fetch order book depth (top N levels)."""
         try:

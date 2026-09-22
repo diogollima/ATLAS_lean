@@ -328,11 +328,299 @@ class TestTickerPriceKeyContract(unittest.TestCase):
         }
         self.assertIn("last_price", keys)
 
-    def test_telegram_bot_reads_the_key_the_scanner_emits(self):
-        with open(os.path.join(PROJECT_DIR, "telegram_bot.py"), encoding="utf-8") as f:
-            source = f.read()
-        self.assertNotIn('"lastPrice"', source)
-        self.assertIn('"last_price"', source)
+    def test_no_module_reads_the_raw_binance_camelcase_key(self):
+        """
+        scanner.py is the only place Binance's camelCase wire format is
+        allowed; every consumer downstream sees snake_case. /close reading
+        "lastPrice" out of a snake_case dict is what booked 0 PnL on every
+        manual close.
+
+        (After the single-price refactor telegram_bot no longer touches the
+        ticker dict at all — it calls scanner.fetch_price(). This guards
+        against the camelCase key creeping back into any consumer.)
+        """
+        for filename in ("telegram_bot.py", "main.py", "indicators.py"):
+            with open(os.path.join(PROJECT_DIR, filename), encoding="utf-8") as f:
+                source = f.read()
+            with self.subTest(module=filename):
+                self.assertNotIn('"lastPrice"', source)
+                self.assertNotIn("'lastPrice'", source)
+
+    def test_ticker_dict_keys_are_all_snake_case(self):
+        """Nothing in the returned dict should leak Binance's wire naming."""
+        tree = _source_tree("scanner.py")
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    node.name == "fetch_ticker_24h":
+                returned_keys = {
+                    k.value
+                    for ret in ast.walk(node) if isinstance(ret, ast.Dict)
+                    for k in ret.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)
+                }
+                self.assertTrue(returned_keys, "no dict literal found")
+                for key in returned_keys:
+                    with self.subTest(key=key):
+                        self.assertEqual(key, key.lower(),
+                                         f"{key!r} is not snake_case")
+
+
+class TestPnlAccounting(unittest.TestCase):
+    """
+    pnl_pct divided by `entry` instead of the risk distance, understating every
+    result by risk_distance/entry — ~33x at the 3% SPOT stop floor. That column
+    feeds get_daily_pnl(), which drives the DAILY_DRAWDOWN_HALT_PCT circuit
+    breaker, so the halt needed ~148 consecutive full losses instead of ~4.
+    """
+
+    ACCOUNT = 1000.0
+    ENTRY = 60000.0
+    STOP = 60000.0 * 0.97          # 3% SPOT floor
+    NOTIONAL = 300.0               # 30% allocation cap
+
+    def setUp(self):
+        import db
+        from paper_trader import PaperTrader
+        self._original_path = config.DB_PATH
+        fd, self._path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(self._path)
+        config.DB_PATH = self._path
+        db._conn = None
+        db.init_db()
+        self.db = db
+        self.trader = PaperTrader()
+
+        qty = self.NOTIONAL / self.ENTRY
+        self.risk_pct = qty * (self.ENTRY - self.STOP) / self.ACCOUNT * 100
+        self.qty = qty
+
+    def tearDown(self):
+        if self.db._conn:
+            self.db._conn.close()
+            self.db._conn = None
+        config.DB_PATH = self._original_path
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self._path + suffix):
+                os.unlink(self._path + suffix)
+
+    def _open(self):
+        return self.db.insert_trade(
+            pair="BTCUSDT", direction="LONG", source="SCANNER",
+            regime_at_entry="PULLBACK", entry_price=self.ENTRY,
+            stop_initial=self.STOP, tp1=self.ENTRY * 1.045,
+            tp2=self.ENTRY * 1.09, position_size_pct=self.risk_pct,
+            atr_at_entry=100.0,
+        )
+
+    def _truth_pct(self, exit_price):
+        """Ground truth: realized dollars as a percentage of the account."""
+        return self.qty * (exit_price - self.ENTRY) / self.ACCOUNT * 100
+
+    def test_full_stop_out_records_the_real_account_percentage(self):
+        result = self.trader.close_trade(self._open(), self.STOP, "STOP_HIT")
+        self.assertAlmostEqual(result["pnl_r"], -1.0, places=6)
+        self.assertAlmostEqual(result["pnl_pct"], self._truth_pct(self.STOP), places=6)
+
+    def test_winner_records_the_real_account_percentage(self):
+        target = self.ENTRY + (self.ENTRY - self.STOP) * 1.5   # +1.5R
+        result = self.trader.close_trade(self._open(), target, "TP1")
+        self.assertAlmostEqual(result["pnl_r"], 1.5, places=6)
+        self.assertAlmostEqual(result["pnl_pct"], self._truth_pct(target), places=6)
+
+    def test_drawdown_halt_trips_within_a_handful_of_losses(self):
+        from position_manager import PositionManager
+        manager = PositionManager()
+        losses = 0
+        while not manager.check_daily_halt():
+            self.trader.close_trade(self._open(), self.STOP, "STOP_HIT")
+            losses += 1
+            self.assertLess(losses, 20, "drawdown halt never tripped")
+        self.assertLessEqual(
+            losses, 6,
+            f"halt took {losses} full losses at {self.risk_pct:.2f}% risk "
+            f"against a {config.DAILY_DRAWDOWN_HALT_PCT}% limit",
+        )
+
+    def test_tp1_gain_survives_a_breakeven_stop(self):
+        """
+        close_half() banked nothing, so half-closing at TP1 and then stopping
+        out at breakeven recorded ~0R — discarding the profit actually taken.
+        """
+        trade_id = self._open()
+        tp1_price = self.ENTRY + (self.ENTRY - self.STOP) * 1.5
+        self.trader.close_half(trade_id, tp1_price)
+        result = self.trader.close_trade(trade_id, self.ENTRY, "STOP_HIT")
+        # half banked at +1.5R, half exits flat -> +0.75R
+        self.assertAlmostEqual(result["pnl_r"], 0.75, places=6)
+        self.assertGreater(result["pnl_pct"], 0)
+
+    def test_untouched_trade_banks_nothing(self):
+        result = self.trader.close_trade(self._open(), self.ENTRY, "MANUAL")
+        self.assertAlmostEqual(result["pnl_r"], 0.0, places=6)
+
+
+class TestEquityCompounds(unittest.TestCase):
+    """
+    open_trade() bound account_usdt to config.PAPER_BALANCE at import time, so
+    every trade was sized against the starting balance forever.
+    """
+
+    def setUp(self):
+        import db
+        from paper_trader import PaperTrader
+        self._original_path = config.DB_PATH
+        fd, self._path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(self._path)
+        config.DB_PATH = self._path
+        db._conn = None
+        db.init_db()
+        self.db = db
+        self.trader = PaperTrader()
+
+    def tearDown(self):
+        if self.db._conn:
+            self.db._conn.close()
+            self.db._conn = None
+        config.DB_PATH = self._original_path
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self._path + suffix):
+                os.unlink(self._path + suffix)
+
+    def _closed_trade(self, pnl_pct):
+        trade_id = self.db.insert_trade(
+            pair="BTCUSDT", direction="LONG", source="SCANNER",
+            regime_at_entry="PULLBACK", entry_price=100.0, stop_initial=97.0,
+            tp1=104.0, tp2=109.0, position_size_pct=1.0, atr_at_entry=1.0,
+        )
+        self.db.update_trade(
+            trade_id, status="CLOSED", pnl_r=pnl_pct, pnl_pct=pnl_pct,
+            closed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def test_equity_starts_at_the_configured_balance(self):
+        self.assertAlmostEqual(self.trader.current_equity(), config.PAPER_BALANCE, places=6)
+
+    def test_gains_compound_multiplicatively(self):
+        self._closed_trade(10.0)
+        self._closed_trade(10.0)
+        # 1000 -> 1100 -> 1210, not 1200: each pnl_pct is a share of the
+        # equity that preceded it.
+        self.assertAlmostEqual(self.trader.current_equity(1000.0), 1210.0, places=6)
+
+    def test_losses_reduce_equity(self):
+        self._closed_trade(-20.0)
+        self.assertAlmostEqual(self.trader.current_equity(1000.0), 800.0, places=6)
+
+    def test_open_trade_default_is_not_bound_at_import(self):
+        import inspect
+        from paper_trader import PaperTrader
+        default = inspect.signature(PaperTrader.open_trade).parameters["account_usdt"].default
+        self.assertIsNone(
+            default,
+            "account_usdt must default to None and resolve to live equity, "
+            "not freeze config.PAPER_BALANCE at import time",
+        )
+
+    def test_depleted_account_is_rejected(self):
+        from paper_trader import PaperTrader, TradeSetup
+        self._closed_trade(-100.0)
+        self.assertEqual(self.trader.current_equity(1000.0), 0.0)
+        setup = TradeSetup(
+            pair="BTCUSDT", direction="LONG", entry_price=100.0,
+            stop_initial=97.0, tp1=104.0, tp2=109.0,
+            position_size_pct=1.0, atr_at_entry=1.0,
+        )
+        with self.assertRaises(ValueError):
+            self.trader.open_trade(setup)
+
+
+class TestSchemaMigration(unittest.TestCase):
+    """A pre-existing database must gain realized_pnl_r without losing rows."""
+
+    def setUp(self):
+        import db
+        self._original_path = config.DB_PATH
+        fd, self._path = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        os.unlink(self._path)
+        config.DB_PATH = self._path
+        db._conn = None
+        self.db = db
+
+    def tearDown(self):
+        if self.db._conn:
+            self.db._conn.close()
+            self.db._conn = None
+        config.DB_PATH = self._original_path
+        for suffix in ("", "-wal", "-shm"):
+            if os.path.exists(self._path + suffix):
+                os.unlink(self._path + suffix)
+
+    def test_column_is_added_to_a_legacy_database(self):
+        import sqlite3
+        # A trades table as it existed before realized_pnl_r
+        legacy = sqlite3.connect(self._path)
+        legacy.execute("""
+            CREATE TABLE trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pair TEXT NOT NULL, direction TEXT NOT NULL,
+                source TEXT, regime_at_entry TEXT,
+                entry_price REAL NOT NULL, stop_initial REAL NOT NULL,
+                stop_current REAL NOT NULL, stop_state TEXT,
+                tp1 REAL, tp2 REAL, position_size_pct REAL NOT NULL,
+                peak_price REAL, half_closed INTEGER DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'OPEN', close_price REAL,
+                pnl_r REAL, pnl_pct REAL, opened_at TEXT, closed_at TEXT,
+                atr_at_entry REAL, strategy_version TEXT, notes TEXT,
+                signal_id INTEGER
+            )""")
+        legacy.execute(
+            "INSERT INTO trades (pair, direction, entry_price, stop_initial,"
+            " stop_current, position_size_pct) VALUES ('BTCUSDT','LONG',1,1,1,1)")
+        legacy.commit()
+        legacy.close()
+
+        self.db.init_db()
+        columns = {r["name"] for r in self.db.get_conn().execute("PRAGMA table_info(trades)")}
+        self.assertIn("realized_pnl_r", columns)
+        surviving = self.db.get_conn().execute("SELECT COUNT(*) c FROM trades").fetchone()["c"]
+        self.assertEqual(surviving, 1, "migration dropped existing rows")
+
+    def test_migration_is_idempotent(self):
+        self.db.init_db()
+        self.db.init_db()   # must not raise "duplicate column name"
+        columns = {r["name"] for r in self.db.get_conn().execute("PRAGMA table_info(trades)")}
+        self.assertIn("realized_pnl_r", columns)
+
+
+class TestSinglePriceFetch(unittest.TestCase):
+    """
+    /close and /closehalf called scan_all() — 5 kline timeframes plus depth,
+    book ticker, aggTrades and 24h stats for every watchlist pair — to read
+    one number.
+    """
+
+    def test_scanner_exposes_a_single_price_fetch(self):
+        from scanner import BinanceScanner
+        self.assertTrue(hasattr(BinanceScanner, "fetch_price"))
+
+    def test_endpoint_is_the_lightweight_one(self):
+        self.assertTrue(config.EP_TICKER_PRICE.endswith("/ticker/price"))
+
+    def test_close_commands_no_longer_call_scan_all(self):
+        tree = _source_tree("telegram_bot.py")
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and \
+                    node.name in {"_cmd_close", "_cmd_closehalf"}:
+                called = {
+                    n.func.attr for n in ast.walk(node)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                }
+                with self.subTest(command=node.name):
+                    self.assertNotIn("scan_all", called)
+                    self.assertIn("fetch_price", called)
 
 
 class TestClaudeClientIsAsync(unittest.TestCase):

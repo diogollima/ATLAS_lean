@@ -372,17 +372,18 @@ class TelegramBot:
             await update.message.reply_text(f"No open trade for {pair}")
             return
 
-        # Use entry price as exit for manual close (paper trading)
-        # In reality, user should provide price or we fetch it
+        # Fetch the live price (weight 1). Falls back to entry price only if
+        # the fetch fails, which books 0 PnL — so warn loudly when it happens.
         exit_price = trade["entry_price"]
         if self.atlas:
-            try:
-                data = await self.atlas.scanner.scan_all()
-                ticker = data.get(pair, {}).get("ticker24h") or {}
-                if "last_price" in ticker:
-                    exit_price = float(ticker["last_price"])
-            except Exception:
-                pass
+            live = await self.atlas.scanner.fetch_price(pair)
+            if live is not None:
+                exit_price = live
+            else:
+                await update.message.reply_text(
+                    f"Could not fetch live price for {pair} — "
+                    f"closing at entry ({exit_price:.2f}), PnL will read 0."
+                )
 
         try:
             result = self.trader.close_trade(trade["id"], exit_price, "MANUAL")
@@ -410,16 +411,17 @@ class TelegramBot:
             await update.message.reply_text(f"No open trade for {pair}")
             return
 
-        # Fetch current price
+        # Fetch the live price (weight 1)
         current_price = trade["entry_price"]
         if self.atlas:
-            try:
-                data = await self.atlas.scanner.scan_all()
-                ticker = data.get(pair, {}).get("ticker24h") or {}
-                if "last_price" in ticker:
-                    current_price = float(ticker["last_price"])
-            except Exception:
-                pass
+            live = await self.atlas.scanner.fetch_price(pair)
+            if live is not None:
+                current_price = live
+            else:
+                await update.message.reply_text(
+                    f"Could not fetch live price for {pair} — "
+                    f"using entry ({current_price:.2f})."
+                )
 
         try:
             result = self.trader.close_half(trade["id"], current_price)
